@@ -37,7 +37,7 @@ All stages run inside a single always-on Python process scheduled by APScheduler
 ### Module boundaries
 
 - `sources/` — one module per platform, all implementing the same `Source` ABC with a `fetch(since_id) -> list[RawItem]` method. Swapping in a new platform is ~100 lines. Supported in MVP: Reddit, Hacker News, GitHub, X Recent Search. Added later: RSS.
-- `storage.py` — SQLite access layer. Three tables: `items`, `classifications`, `alerts`. One database file per project.
+- `storage.py` — SQLite access layer. Tables: `items`, `source_cursors`, `api_usage` today; session 3 adds `classifications`, session 4 adds `alerts`. One database file per project. No migration framework — additive `CREATE TABLE IF NOT EXISTS` is enough until we change an existing column.
 - `classifier.py` — assembles the prompt from `classifier.yaml`, calls the Anthropic API, parses the JSON response. Stores `prompt_version` on each classification for regression tracking.
 - `router.py` — reads classifications, decides immediate-vs-digest based on urgency threshold, deduplicates against the `alerts` table to avoid re-alerting on the same item.
 - `notifier.py` — Slack webhook client. Block Kit formatting for rich alerts.
@@ -195,6 +195,16 @@ Each session is a focused Claude Code working session producing a reviewable dif
 6. Re-run eval. Target 85%+ precision on alert-worthy categories.
 7. Commit the prompt version that ships to prod. Keep v1 around for A/B.
 
+**Source-specific context the classifier must read** (from session 2's item shapes):
+
+- **Reddit:** `title` + `body`. `raw_json.subreddit` is a useful prior — a complaint in `r/devops` reads differently than in `r/learnprogramming`.
+- **Hacker News:** story items have `title`; comment items have a synthesized title and the actual signal in `body`. `raw_json._tags` distinguishes them.
+- **GitHub issues:** `body` is the issue body. `raw_json.is_pr` flags PRs if `type: both` is in config.
+- **GitHub comments:** `body` is the comment; the meaningful context (issue title, state, repo) is in `raw_json.parent_issue`. **The classifier must receive both** — a neutral issue title can hide a high-signal comment. `raw_json.matched_query` names the query that surfaced it.
+- **X:** `body` is the tweet text. `raw_json.tweet.public_metrics` (likes/replies/retweets) is a candidate urgency signal; `raw_json.author.verified` is a candidate reach signal.
+
+**Also relevant to session 3's cost tracking:** the `api_usage` table already exists and tracks X reads. Extend it or add a `classifier_usage` table for Haiku input/output token counts — same shape, different `source` value (`"classifier"`).
+
 **Non-goals:** Slack alerts, digest, routing (those come in session 4).
 
 ### Session 4 — Routing, alerts, digest, handling
@@ -299,11 +309,16 @@ Each session is a focused Claude Code working session producing a reviewable dif
 
 Updated as sessions reveal new decisions. Current open items:
 
-- **X API authentication flow in pay-per-use:** still beta-gated as of April 2026; if we can't get pay-per-use access, session 2's X source falls back to legacy Basic tier ($200/mo) or gets deprioritized until we can. Verify before starting session 2.
+- **X full-archive search (`/2/tweets/search/all`):** session 2 clamps `backfill` to 7 days because Recent Search's retention window is 7 days. Full-archive is a different pricing tier and isn't wired up. Decide before session 3's eval whether we need deeper history; otherwise the eval set's X slice is limited to the last week.
+- **GitHub comment-extraction precision:** we client-side substring-match comment bodies (operator stopwords dropped) after GitHub's broader `in:comments` search. If GitHub's search is looser than our matcher, we drop signal; if tighter, we extract noise. Diagnostic log `github.comments.fetched` shows the `comments_total` vs `comments_matched` ratio per issue — watch during session 3 eval to decide if we need a proper tokenizer for GitHub's search grammar.
 - **Slack interactive buttons vs CLI-only handled:** the Slack button approach requires exposing an HTTPS endpoint to Slack, which complicates the EC2 SG setup. CLI-only (`social-surveyor handled <id>`) is the MVP choice. Revisit after session 5 if the CLI workflow feels clunky in daily use.
 - **Rate limit for Anthropic API calls:** during backfill operations we could hit Anthropic's tier-based rate limits. Need concurrency control in `classifier.py` — single worker with configurable RPS cap is simplest.
 - **Eval set size:** 50 items is the starting target; real accuracy tuning may need 200+. Budget time in session 3 for hand-labeling to keep pace.
 - **Multi-project conflicts:** if two projects poll the same subreddit, we fetch and store twice. Acceptable for now (different projects have different classifiers, different storage). Revisit if it becomes a cost issue.
+
+Resolved:
+
+- *X API pay-per-use (session 2):* works with a standard Developer Portal bearer token. Pricing is $0.005/post read, capped at 2M/mo. The X source enforces a per-project `daily_read_cap` via the `api_usage` table before every per-query call; `--dry-run` never hits the API. The `usage` CLI subcommand reports today- and month-to-date reads.
 
 ---
 
