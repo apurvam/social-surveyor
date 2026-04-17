@@ -13,7 +13,7 @@ from dotenv import load_dotenv
 from . import __version__
 from .config import ConfigError, ProjectConfig, load_project_config
 from .log_config import configure_logging
-from .sources.base import Source
+from .sources.base import Source, SourceInitError
 from .sources.reddit import RedditSource
 from .storage import Storage
 from .types import RawItem
@@ -68,7 +68,7 @@ def _build_sources(cfg: ProjectConfig, source_filter: str | None) -> list[Source
     try:
         if cfg.reddit is not None and (source_filter is None or source_filter == "reddit"):
             sources.append(RedditSource(cfg.reddit))
-    except RuntimeError as e:
+    except SourceInitError as e:
         typer.echo(str(e), err=True)
         raise typer.Exit(code=2) from None
 

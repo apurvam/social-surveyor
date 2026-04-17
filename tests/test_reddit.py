@@ -7,6 +7,7 @@ from unittest.mock import MagicMock
 import pytest
 
 from social_surveyor.config import RedditSourceConfig
+from social_surveyor.sources.base import SourceInitError
 from social_surveyor.sources.reddit import RedditSource, _days_to_time_filter
 
 
@@ -171,10 +172,12 @@ def test_days_to_time_filter_buckets() -> None:
     assert _days_to_time_filter(400) == "all"
 
 
-def test_init_raises_when_env_missing(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_init_raises_source_init_error_when_env_missing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     for var in ("REDDIT_CLIENT_ID", "REDDIT_CLIENT_SECRET", "REDDIT_USER_AGENT"):
         monkeypatch.delenv(var, raising=False)
     cfg = RedditSourceConfig(subreddits=["devops"], queries=["q"])
-    with pytest.raises(RuntimeError) as exc:
+    with pytest.raises(SourceInitError) as exc:
         RedditSource(cfg)
     assert "REDDIT_CLIENT_ID" in str(exc.value)

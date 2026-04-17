@@ -16,7 +16,7 @@ from tenacity import (
 
 from ..config import RedditSourceConfig
 from ..types import RawItem
-from .base import Source
+from .base import Source, SourceInitError
 
 if TYPE_CHECKING:
     from praw.models import Submission
@@ -70,7 +70,7 @@ class RedditSource(Source):
     def _build_client(cls) -> praw.Reddit:
         missing = [k for k in cls._REQUIRED_ENV if not os.environ.get(k)]
         if missing:
-            raise RuntimeError(
+            raise SourceInitError(
                 f"Reddit source requires env vars: {', '.join(missing)}. "
                 "Set them in .env or your shell."
             )
@@ -105,6 +105,7 @@ class RedditSource(Source):
         cutoff = datetime.now(UTC) - timedelta(days=days)
         time_filter = _days_to_time_filter(days)
         items: list[RawItem] = []
+        fetched_count = 0
         for subreddit in self.cfg.subreddits:
             for query in self.cfg.queries:
                 submissions = self._search(
@@ -119,8 +120,9 @@ class RedditSource(Source):
                     for s in submissions
                     if datetime.fromtimestamp(s.created_utc, tz=UTC) >= cutoff
                 ]
-                log.info(
-                    "reddit.backfill",
+                fetched_count += len(submissions)
+                log.debug(
+                    "reddit.backfill.search",
                     subreddit=subreddit,
                     query=query,
                     time_filter=time_filter,
@@ -128,6 +130,16 @@ class RedditSource(Source):
                     kept=len(filtered),
                 )
                 items.extend(self._to_raw_item(s) for s in filtered)
+        # Diagnostic: if fetched_count >> len(items), Reddit's coarse
+        # time_filter is over-fetching and we may want to tune queries.
+        log.info(
+            "backfill.complete",
+            source="reddit",
+            fetched_count=fetched_count,
+            after_client_filter_count=len(items),
+            days_requested=days,
+            reddit_time_filter_used=time_filter,
+        )
         return items
 
     # PRAW handles 429s internally but can still raise on transient network

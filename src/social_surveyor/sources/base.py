@@ -5,6 +5,14 @@ from abc import ABC, abstractmethod
 from ..types import RawItem
 
 
+class SourceInitError(Exception):
+    """Raised when a Source cannot be initialized (e.g., missing credentials).
+
+    The CLI catches this specifically and prints the message cleanly to
+    stderr with a non-zero exit code — no traceback.
+    """
+
+
 class Source(ABC):
     """Common interface every platform source implements.
 
