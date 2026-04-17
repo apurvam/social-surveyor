@@ -1,0 +1,39 @@
+# Real Reddit config for opendata-timeseries monitoring.
+# Targets three themes: observability cost pain, Prometheus long-term
+# storage questions, and mentions of competing long-term storage backends.
+#
+# Queries are intentionally broad (low precision, high recall) — the
+# classifier is the precision layer. Dedupe is free, so overlap between
+# queries is fine. Tune after we've seen ~500 posts come through.
+
+subreddits:
+  - devops
+  - kubernetes
+  - sre
+  - selfhosted
+  - PrometheusMonitoring
+  - observability
+  - grafana
+  - monitoring
+
+queries:
+  # Observability cost pain
+  - "datadog cost"
+  - "datadog expensive"
+  - "new relic bill"
+  - "grafana cloud expensive"
+  - "observability bill"
+
+  # Prometheus long-term storage
+  - "prometheus long term"
+  - "prometheus storage"
+  - "self host prometheus"
+  - "prometheus retention"
+
+  # Competitor mentions
+  - "thanos"
+  - "mimir"
+  - "cortex prometheus"
+
+limit_per_query: 100
+time_filter: week

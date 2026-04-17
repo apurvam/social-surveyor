@@ -1,0 +1,20 @@
+# Example Reddit source config — generic devtool monitoring.
+# Fork this project and replace the subreddits/queries with ones that
+# match your ICP.
+
+subreddits:
+  - devops
+  - kubernetes
+  - selfhosted
+  - sre
+  - sysadmin
+
+queries:
+  - "self hosted"
+  - "alternatives to"
+  - "recommend"
+  - "anyone using"
+  - "best tool for"
+
+limit_per_query: 100
+time_filter: week
