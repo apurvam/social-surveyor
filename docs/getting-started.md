@@ -18,21 +18,38 @@ uv sync
 This creates `.venv/`, installs pinned dependencies, and makes the
 `social-surveyor` entry point available via `uv run`.
 
-## Reddit OAuth
+## Credentials
+
+Copy `.env.example` to `.env` and fill in whichever sources you plan to
+use. `social-surveyor` loads `.env` automatically via python-dotenv.
+
+### Reddit (free)
 
 1. Go to https://www.reddit.com/prefs/apps and click **create another app**.
-2. Pick **script**, give it any name, and set redirect URI to
-   `http://localhost:8080` (unused in practice — we do application-only OAuth).
-3. Note the 14-character client ID under the app name and the client secret.
-4. Copy `.env.example` to `.env` and fill in:
+2. Pick **script**, give it any name, set redirect URI to
+   `http://localhost:8080` (unused — we do application-only OAuth).
+3. Fill in the client id, secret, and user agent in `.env`.
 
-```
-REDDIT_CLIENT_ID=...
-REDDIT_CLIENT_SECRET=...
-REDDIT_USER_AGENT=social-surveyor/0.1 by <your-reddit-username>
-```
+### Hacker News (no auth)
 
-`social-surveyor` loads `.env` automatically via python-dotenv.
+Nothing to set. The Algolia search endpoint is public.
+
+### GitHub (free tier, 5000 req/hour)
+
+1. Create a token at https://github.com/settings/tokens. No scopes are
+   required for public search.
+2. Set `GITHUB_TOKEN` in `.env`.
+
+### X (Twitter) — **paid**, read carefully
+
+X Recent Search is pay-per-use at `$0.005/post read`. Each source has a
+`daily_read_cap` in its YAML; polls that would exceed the cap are
+skipped with a warning. Generate a bearer token at
+https://developer.x.com/en/portal/dashboard and set `X_BEARER_TOKEN`.
+
+The `--dry-run` flag on `poll` **does not call the X API** — it prints
+the configured queries and prior cursors/usage instead. Use it
+liberally.
 
 ## Verify the CLI
 
@@ -43,36 +60,45 @@ uv run social-surveyor --version
 
 ## Sanity-check with a dry run
 
-`--dry-run` fetches from Reddit and prints items to stdout without
-touching the database:
+`--dry-run` prints to stdout without touching the database. For X it
+also does not hit the API — it prints your configured queries and any
+prior cursor/usage state.
 
 ```bash
+# Per-source dry runs
 uv run social-surveyor poll --project opendata --source reddit --dry-run
+uv run social-surveyor poll --project opendata --source hackernews --dry-run
+uv run social-surveyor poll --project opendata --source github --dry-run
+uv run social-surveyor poll --project opendata --source x --dry-run
 ```
 
-Each line is a JSON blob representing one `RawItem`. If this works,
-your Reddit creds are good.
-
-## Start collecting data
-
-Drop `--dry-run` to persist to `data/opendata.db`:
+## Poll all sources
 
 ```bash
-uv run social-surveyor poll --project opendata --source reddit
+uv run social-surveyor poll --project opendata
 ```
 
-Re-running is safe — dedupe is scoped by `(source, platform_id)`, so
-duplicates are silently skipped.
+A failure in one source (e.g. GitHub rate limit) is logged and the
+poll moves on to the next source.
 
 ## Backfill recent history
 
 ```bash
 uv run social-surveyor backfill --project opendata --source reddit --days 7
+uv run social-surveyor backfill --project opendata --source hackernews --days 7
+uv run social-surveyor backfill --project opendata --source github --days 7
+# X backfill is served by Recent Search only and caps at 7 days.
+uv run social-surveyor backfill --project opendata --source x --days 7
 ```
 
-Reddit's search API has coarse time filters (day/week/month/year/all);
-we pick the narrowest bucket that covers the window and re-filter
-client-side to the exact cutoff.
+## Check X usage
+
+```bash
+uv run social-surveyor usage --project opendata --source x
+```
+
+Prints today- and month-to-date post read counts and the configured
+`daily_read_cap`.
 
 ## Inspect the database
 

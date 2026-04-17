@@ -9,8 +9,9 @@ and [`docs/getting-started.md`](./docs/getting-started.md) for setup.
 
 ## Status
 
-Session 1: skeleton and Reddit data collection. Polls configured
-subreddits/queries, dedupes by `(source, platform_id)`, writes SQLite.
+Session 2: Reddit + Hacker News + GitHub (issues and matching comments)
++ X (Twitter) Recent Search with cost guardrails. All sources dedupe
+by `(source, platform_id)` and write to one SQLite file per project.
 No LLM, no Slack yet — those land in sessions 3 and 4.
 
 ## Quick start
@@ -18,10 +19,11 @@ No LLM, no Slack yet — those land in sessions 3 and 4.
 ```bash
 brew install uv                               # or see https://docs.astral.sh/uv/
 uv sync
-cp .env.example .env                          # then fill in Reddit OAuth creds
-uv run social-surveyor poll --project opendata --source reddit --dry-run
-uv run social-surveyor poll --project opendata --source reddit
+cp .env.example .env                          # fill in creds for the sources you use
+uv run social-surveyor poll --project opendata --dry-run
+uv run social-surveyor poll --project opendata
 uv run social-surveyor backfill --project opendata --source reddit --days 7
+uv run social-surveyor usage --project opendata --source x
 ```
 
 ## Developer workflow
