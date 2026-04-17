@@ -12,7 +12,7 @@ from dotenv import load_dotenv
 
 from . import __version__
 from .config import ConfigError, ProjectConfig, load_project_config
-from .logging import configure_logging
+from .log_config import configure_logging
 from .sources.base import Source
 from .sources.reddit import RedditSource
 from .storage import Storage
