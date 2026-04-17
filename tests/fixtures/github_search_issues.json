@@ -1,0 +1,35 @@
+{
+  "total_count": 2,
+  "incomplete_results": false,
+  "items": [
+    {
+      "id": 999001,
+      "number": 1234,
+      "title": "Prometheus long-term storage is expensive",
+      "body": "Running Prometheus on large clusters, retention costs are killing us. Any cheaper alternatives?",
+      "html_url": "https://github.com/prometheus/prometheus/issues/1234",
+      "user": {"login": "alice"},
+      "state": "open",
+      "created_at": "2026-04-15T10:00:00Z",
+      "updated_at": "2026-04-15T12:00:00Z",
+      "labels": [{"name": "question"}],
+      "repository_url": "https://api.github.com/repos/prometheus/prometheus",
+      "comments": 5
+    },
+    {
+      "id": 999002,
+      "number": 5678,
+      "title": "Support for remote write",
+      "body": "Considering VictoriaMetrics for long-term storage.",
+      "html_url": "https://github.com/grafana/mimir/issues/5678",
+      "user": {"login": "bob"},
+      "state": "open",
+      "created_at": "2026-04-14T10:00:00Z",
+      "updated_at": "2026-04-14T10:00:00Z",
+      "labels": [],
+      "repository_url": "https://api.github.com/repos/grafana/mimir",
+      "comments": 3,
+      "pull_request": {"url": "https://api.github.com/repos/grafana/mimir/pulls/5678"}
+    }
+  ]
+}

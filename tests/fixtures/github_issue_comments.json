@@ -1,0 +1,29 @@
+[
+  {
+    "id": 777001,
+    "body": "We gave up on thanos, costs too much, switching to VictoriaMetrics.",
+    "html_url": "https://github.com/prometheus/prometheus/issues/1234#issuecomment-777001",
+    "user": {"login": "carol"},
+    "created_at": "2026-04-16T08:00:00Z",
+    "updated_at": "2026-04-16T08:00:00Z",
+    "issue_url": "https://api.github.com/repos/prometheus/prometheus/issues/1234"
+  },
+  {
+    "id": 777002,
+    "body": "+1, this thread.",
+    "html_url": "https://github.com/prometheus/prometheus/issues/1234#issuecomment-777002",
+    "user": {"login": "dave"},
+    "created_at": "2026-04-16T09:00:00Z",
+    "updated_at": "2026-04-16T09:00:00Z",
+    "issue_url": "https://api.github.com/repos/prometheus/prometheus/issues/1234"
+  },
+  {
+    "id": 777003,
+    "body": "Have you tried Mimir? Cheaper than thanos in our experience.",
+    "html_url": "https://github.com/prometheus/prometheus/issues/1234#issuecomment-777003",
+    "user": {"login": "erin"},
+    "created_at": "2026-04-16T10:00:00Z",
+    "updated_at": "2026-04-16T10:00:00Z",
+    "issue_url": "https://api.github.com/repos/prometheus/prometheus/issues/1234"
+  }
+]
