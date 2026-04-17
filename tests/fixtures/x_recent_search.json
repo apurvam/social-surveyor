@@ -1,0 +1,32 @@
+{
+  "data": [
+    {
+      "id": "1900000000000000001",
+      "text": "Datadog bill hit $18k this month. Looking seriously at self-hosted Prometheus + Thanos now.",
+      "author_id": "111111",
+      "created_at": "2026-04-16T12:00:00.000Z",
+      "public_metrics": {"retweet_count": 4, "reply_count": 2, "like_count": 30, "quote_count": 1},
+      "lang": "en"
+    },
+    {
+      "id": "1900000000000000002",
+      "text": "Mimir is a nightmare to operate at scale. Wish there was something simpler.",
+      "author_id": "222222",
+      "created_at": "2026-04-16T11:00:00.000Z",
+      "public_metrics": {"retweet_count": 0, "reply_count": 1, "like_count": 5, "quote_count": 0},
+      "lang": "en"
+    }
+  ],
+  "includes": {
+    "users": [
+      {"id": "111111", "username": "alice_ops", "name": "Alice Operator", "verified": false},
+      {"id": "222222", "username": "bob_sre", "name": "Bob SRE", "verified": true}
+    ]
+  },
+  "meta": {
+    "newest_id": "1900000000000000001",
+    "oldest_id": "1900000000000000002",
+    "result_count": 2,
+    "next_token": null
+  }
+}
