@@ -1,0 +1,67 @@
+[project]
+name = "social-surveyor"
+version = "0.1.0"
+description = "A self-hosted social listening pipeline for founders and small teams."
+readme = "README.md"
+license = { text = "MIT" }
+authors = [{ name = "Apurva Mehta", email = "apurva@responsive.dev" }]
+requires-python = ">=3.12,<3.13"
+dependencies = [
+    "typer>=0.12.0",
+    "pydantic>=2.6.0",
+    "pyyaml>=6.0.1",
+    "structlog>=24.1.0",
+    "praw>=7.7.1",
+    "python-dotenv>=1.0.1",
+    "tenacity>=8.2.3",
+]
+
+[project.scripts]
+social-surveyor = "social_surveyor.cli:app"
+
+[dependency-groups]
+dev = [
+    "pytest>=8.0.0",
+    "pytest-mock>=3.12.0",
+    "ruff>=0.4.0",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/social_surveyor"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = [
+    "E",    # pycodestyle errors
+    "W",    # pycodestyle warnings
+    "F",    # pyflakes
+    "I",    # isort
+    "B",    # flake8-bugbear
+    "SIM",  # flake8-simplify
+    "UP",   # pyupgrade
+    "N",    # pep8-naming
+    "C4",   # flake8-comprehensions
+    "PTH",  # flake8-use-pathlib
+    "RUF",  # ruff-specific
+]
+ignore = [
+    "E501",  # line length — ruff format handles wrapping where possible
+]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/*" = ["B011"]  # asserts are fine in tests
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra --strict-markers"
+markers = [
+    "live: hits real external APIs; skipped unless --live is passed",
+]
