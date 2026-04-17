@@ -1,0 +1,51 @@
+{
+  "hits": [
+    {
+      "objectID": "41234567",
+      "title": "Prometheus long-term storage is expensive",
+      "url": "https://example.com/blog/prom-storage",
+      "author": "alice",
+      "points": 42,
+      "num_comments": 15,
+      "created_at": "2026-04-15T10:00:00.000Z",
+      "created_at_i": 1776232800,
+      "story_text": null,
+      "comment_text": null,
+      "_tags": ["story", "author_alice", "story_41234567"]
+    },
+    {
+      "objectID": "41234890",
+      "title": "Ask HN: cheapest way to self-host Prometheus?",
+      "url": null,
+      "author": "bob",
+      "points": 10,
+      "num_comments": 5,
+      "created_at": "2026-04-14T12:30:00.000Z",
+      "created_at_i": 1776169800,
+      "story_text": "Looking at Thanos vs Mimir. Datadog is killing our budget.",
+      "comment_text": null,
+      "_tags": ["story", "ask_hn", "author_bob", "story_41234890"]
+    },
+    {
+      "objectID": "41235000",
+      "title": null,
+      "url": null,
+      "author": "carol",
+      "story_id": 41230000,
+      "parent_id": 41230050,
+      "points": null,
+      "num_comments": null,
+      "created_at": "2026-04-14T15:00:00.000Z",
+      "created_at_i": 1776178800,
+      "story_text": null,
+      "comment_text": "We moved off Datadog to self-hosted Prometheus + Thanos. Saved 80%.",
+      "_tags": ["comment", "author_carol", "story_41230000"]
+    }
+  ],
+  "nbHits": 3,
+  "page": 0,
+  "nbPages": 1,
+  "hitsPerPage": 50,
+  "query": "prometheus storage",
+  "params": "query=prometheus+storage&hitsPerPage=50"
+}
