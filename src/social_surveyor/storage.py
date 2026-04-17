@@ -25,6 +25,32 @@ SCHEMA_STATEMENTS: tuple[str, ...] = (
     )
     """,
     "CREATE INDEX IF NOT EXISTS idx_items_source_created ON items(source, created_at DESC)",
+    # Per-(source, cursor_key) incremental cursor. HN tracks the highest
+    # created_at_i per query; X tracks the highest tweet id per query_name.
+    # cursor_value is TEXT to accommodate both numeric timestamps and
+    # opaque platform tokens.
+    """
+    CREATE TABLE IF NOT EXISTS source_cursors (
+        source       TEXT NOT NULL,
+        cursor_key   TEXT NOT NULL,
+        cursor_value TEXT NOT NULL,
+        updated_at   TEXT NOT NULL,
+        PRIMARY KEY (source, cursor_key)
+    )
+    """,
+    # Per-call API usage log for cost tracking. X is the only paid
+    # source today; Reddit/HN/GitHub don't insert here. One row per poll
+    # call; sum by day or month for cost reporting.
+    """
+    CREATE TABLE IF NOT EXISTS api_usage (
+        id             INTEGER PRIMARY KEY AUTOINCREMENT,
+        source         TEXT    NOT NULL,
+        query_name     TEXT    NOT NULL,
+        items_fetched  INTEGER NOT NULL,
+        fetched_at     TEXT    NOT NULL
+    )
+    """,
+    "CREATE INDEX IF NOT EXISTS idx_api_usage_source_fetched ON api_usage(source, fetched_at)",
 )
 
 
@@ -133,6 +159,73 @@ class Storage:
                 "SELECT COUNT(*) AS c FROM items WHERE source = ?", (source,)
             ).fetchone()
         return int(row["c"])
+
+    # --- cursors ---------------------------------------------------------
+
+    def get_cursor(self, source: str, cursor_key: str) -> str | None:
+        row = self._conn.execute(
+            "SELECT cursor_value FROM source_cursors WHERE source = ? AND cursor_key = ?",
+            (source, cursor_key),
+        ).fetchone()
+        return None if row is None else str(row["cursor_value"])
+
+    def set_cursor(self, source: str, cursor_key: str, cursor_value: str) -> None:
+        with self._conn:
+            self._conn.execute(
+                """
+                INSERT INTO source_cursors (source, cursor_key, cursor_value, updated_at)
+                VALUES (?, ?, ?, ?)
+                ON CONFLICT(source, cursor_key) DO UPDATE SET
+                    cursor_value = excluded.cursor_value,
+                    updated_at = excluded.updated_at
+                """,
+                (source, cursor_key, cursor_value, _to_iso(datetime.now(UTC))),
+            )
+
+    def get_cursors(self, source: str) -> dict[str, str]:
+        rows = self._conn.execute(
+            "SELECT cursor_key, cursor_value FROM source_cursors WHERE source = ?",
+            (source,),
+        ).fetchall()
+        return {r["cursor_key"]: r["cursor_value"] for r in rows}
+
+    # --- api usage -------------------------------------------------------
+
+    def record_api_usage(self, source: str, query_name: str, items_fetched: int) -> None:
+        with self._conn:
+            self._conn.execute(
+                """
+                INSERT INTO api_usage (source, query_name, items_fetched, fetched_at)
+                VALUES (?, ?, ?, ?)
+                """,
+                (source, query_name, items_fetched, _to_iso(datetime.now(UTC))),
+            )
+
+    def sum_api_usage(self, source: str, since: datetime) -> int:
+        row = self._conn.execute(
+            """
+            SELECT COALESCE(SUM(items_fetched), 0) AS total
+            FROM api_usage
+            WHERE source = ? AND fetched_at >= ?
+            """,
+            (source, _to_iso(since)),
+        ).fetchone()
+        return int(row["total"])
+
+    def api_usage_by_query(self, source: str, since: datetime) -> dict[str, int]:
+        rows = self._conn.execute(
+            """
+            SELECT query_name, COALESCE(SUM(items_fetched), 0) AS total
+            FROM api_usage
+            WHERE source = ? AND fetched_at >= ?
+            GROUP BY query_name
+            ORDER BY total DESC
+            """,
+            (source, _to_iso(since)),
+        ).fetchall()
+        return {r["query_name"]: int(r["total"]) for r in rows}
+
+    # --- helpers ---------------------------------------------------------
 
     @staticmethod
     def _row_to_dict(row: sqlite3.Row) -> dict[str, Any]:

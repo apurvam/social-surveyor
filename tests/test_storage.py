@@ -73,3 +73,43 @@ def test_schema_persists_across_connections(tmp_path: Path) -> None:
         db.upsert_item(_item("a"))
     with Storage(db_path) as db:
         assert db.count_items() == 1
+
+
+def test_get_cursor_missing_returns_none(tmp_path: Path) -> None:
+    with Storage(tmp_path / "t.db") as db:
+        assert db.get_cursor("x", "q1") is None
+
+
+def test_set_and_get_cursor(tmp_path: Path) -> None:
+    with Storage(tmp_path / "t.db") as db:
+        db.set_cursor("x", "q1", "12345")
+        assert db.get_cursor("x", "q1") == "12345"
+        db.set_cursor("x", "q1", "67890")  # update path
+        assert db.get_cursor("x", "q1") == "67890"
+
+
+def test_get_cursors_returns_all_for_source(tmp_path: Path) -> None:
+    with Storage(tmp_path / "t.db") as db:
+        db.set_cursor("x", "q1", "1")
+        db.set_cursor("x", "q2", "2")
+        db.set_cursor("hackernews", "q3", "3")
+        assert db.get_cursors("x") == {"q1": "1", "q2": "2"}
+        assert db.get_cursors("hackernews") == {"q3": "3"}
+
+
+def test_record_and_sum_api_usage(tmp_path: Path) -> None:
+    with Storage(tmp_path / "t.db") as db:
+        db.record_api_usage("x", "q1", 50)
+        db.record_api_usage("x", "q1", 30)
+        db.record_api_usage("x", "q2", 20)
+        start_of_day = datetime.now(UTC).replace(hour=0, minute=0, second=0, microsecond=0)
+        assert db.sum_api_usage("x", start_of_day) == 100
+        assert db.api_usage_by_query("x", start_of_day) == {"q1": 80, "q2": 20}
+
+
+def test_sum_api_usage_respects_since_cutoff(tmp_path: Path) -> None:
+    with Storage(tmp_path / "t.db") as db:
+        db.record_api_usage("x", "q1", 50)
+        # Everything was recorded "now"; a future cutoff sees nothing.
+        future = datetime.now(UTC) + timedelta(hours=1)
+        assert db.sum_api_usage("x", future) == 0
