@@ -45,6 +45,58 @@ class RedditSourceConfig(SourceConfig):
     )
 
 
+class HackerNewsSourceConfig(SourceConfig):
+    queries: list[str] = Field(..., min_length=1)
+    tags: list[Literal["story", "comment"]] = Field(default_factory=lambda: ["story", "comment"])
+    max_results_per_query: int = Field(default=50, ge=1, le=1000)
+
+
+class GitHubQuery(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    q: str
+    type: Literal["issues", "prs", "both"] = Field(
+        default="issues",
+        description="Maps to GitHub's 'type:' qualifier. 'issues' excludes PRs.",
+    )
+
+
+class GitHubSourceConfig(SourceConfig):
+    queries: list[GitHubQuery] = Field(..., min_length=1)
+    orgs_watchlist: list[str] = Field(default_factory=list)
+    max_results_per_query: int = Field(default=30, ge=1, le=100)
+    # Belt-and-suspenders on top of GitHub's own rate limiter: how many
+    # follow-up /comments calls we'll make per poll to resolve in:comments
+    # matches into actual comment objects.
+    max_comment_fetches_per_poll: int = Field(default=100, ge=1, le=1000)
+
+
+class XQuery(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    name: str = Field(..., min_length=1)
+    query: str = Field(..., min_length=1)
+
+
+class XSourceConfig(SourceConfig):
+    queries: list[XQuery] = Field(..., min_length=1)
+    max_results_per_query: int = Field(
+        default=100,
+        ge=10,
+        le=100,
+        description="X Recent Search allows 10-100 per request.",
+    )
+    poll_interval_minutes: int = Field(
+        default=10,
+        ge=1,
+        description="Informational; the scheduler is a session 5 concern.",
+    )
+    daily_read_cap: int = Field(
+        default=500,
+        ge=1,
+        description="Hard daily ceiling on post reads. A query is skipped if running "
+        "it could push today's total over this cap.",
+    )
+
+
 class ProjectConfig(BaseModel):
     """Aggregated config for a single project.
 
@@ -57,6 +109,9 @@ class ProjectConfig(BaseModel):
 
     name: str
     reddit: RedditSourceConfig | None = None
+    hackernews: HackerNewsSourceConfig | None = None
+    github: GitHubSourceConfig | None = None
+    x: XSourceConfig | None = None
 
 
 def _load_yaml(path: Path) -> dict[str, Any]:
@@ -103,9 +158,17 @@ def load_project_config(
 
     data: dict[str, Any] = {"name": project}
 
-    reddit_file = sources_dir / "reddit.yaml"
-    if reddit_file.is_file():
-        data["reddit"] = _load_yaml(reddit_file)
+    # YAML filename -> ProjectConfig field name.
+    source_files = {
+        "reddit.yaml": "reddit",
+        "hackernews.yaml": "hackernews",
+        "github.yaml": "github",
+        "x.yaml": "x",
+    }
+    for filename, field_name in source_files.items():
+        f = sources_dir / filename
+        if f.is_file():
+            data[field_name] = _load_yaml(f)
 
     try:
         return ProjectConfig.model_validate(data)
