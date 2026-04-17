@@ -1,0 +1,16 @@
+# Example GitHub source config — generic dev-tool monitoring.
+# GITHUB_TOKEN must be set in the environment (no scopes required for
+# public search).
+
+queries:
+  - q: "prometheus storage expensive"
+    type: issues
+  - q: "observability cost"
+    type: issues
+
+orgs_watchlist:
+  - prometheus
+  - grafana
+
+max_results_per_query: 30
+max_comment_fetches_per_poll: 100

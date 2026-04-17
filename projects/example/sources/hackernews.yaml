@@ -1,0 +1,11 @@
+# Example HN source config — generic dev-tool monitoring.
+# Fork and tune for your ICP.
+
+queries:
+  - "self hosted"
+  - "alternatives to datadog"
+  - "prometheus storage"
+  - "kubernetes observability"
+
+tags: ["story", "comment"]
+max_results_per_query: 50

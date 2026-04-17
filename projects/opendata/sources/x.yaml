@@ -1,0 +1,18 @@
+# X config for opendata-timeseries monitoring.
+# COSTS REAL MONEY — $0.005/post read on pay-per-use.
+# daily_read_cap starts low (500) so we can validate signal quality
+# before loosening. Raise after we've seen what the queries return.
+
+queries:
+  - name: "observability_cost_complaints"
+    query: '("datadog bill" OR "new relic cost" OR "grafana cloud expensive") -is:retweet lang:en'
+
+  - name: "prometheus_storage_intent"
+    query: '(prometheus ("self-host" OR "long-term storage" OR "durable")) -is:retweet lang:en'
+
+  - name: "competitor_pain"
+    query: '(mimir OR thanos OR cortex) (complex OR pain OR nightmare OR expensive) -is:retweet lang:en'
+
+max_results_per_query: 100
+poll_interval_minutes: 10
+daily_read_cap: 500

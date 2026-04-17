@@ -1,0 +1,25 @@
+# HN config for opendata-timeseries monitoring.
+# Queries target the same three themes as Reddit: observability cost
+# pain, Prometheus long-term storage, competitor mentions.
+
+queries:
+  # Observability cost pain
+  - "datadog cost"
+  - "datadog expensive"
+  - "new relic bill"
+  - "grafana cloud expensive"
+  - "observability bill"
+
+  # Prometheus storage
+  - "prometheus long term"
+  - "prometheus storage"
+  - "self host prometheus"
+  - "prometheus retention"
+
+  # Competitor mentions
+  - "thanos"
+  - "mimir prometheus"
+  - "cortex prometheus"
+
+tags: ["story", "comment"]
+max_results_per_query: 50

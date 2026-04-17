@@ -1,0 +1,29 @@
+# GitHub config for opendata-timeseries monitoring.
+# Queries run in two scopes per poll: default (issue body/title) and
+# in:comments (comments matching the query text, fetched individually).
+
+queries:
+  - q: "prometheus storage expensive"
+    type: issues
+  - q: "prometheus long term retention"
+    type: issues
+  - q: "thanos OR mimir OR cortex cost"
+    type: issues
+  - q: "datadog replacement observability"
+    type: issues
+  - q: "VictoriaMetrics vs thanos"
+    type: issues
+
+orgs_watchlist:
+  - prometheus
+  - grafana
+  - thanos-io
+  - cortexproject
+  - VictoriaMetrics
+
+max_results_per_query: 30
+# Belt-and-suspenders against runaway comment fetches. Worst case under
+# the defaults (5 queries × 30 results each with in:comments scope) is
+# 150 issues; 100 here means we'll cap out on a busy day but still pull
+# the most recent matches first.
+max_comment_fetches_per_poll: 100

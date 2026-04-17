@@ -1,0 +1,13 @@
+# Example X (Twitter) source config.
+# COSTS REAL MONEY ($0.005/post read on pay-per-use). Start with a
+# small daily_read_cap and raise only after validating signal quality.
+
+queries:
+  - name: "generic_devtool_cost"
+    query: '("self hosted" OR "alternatives to") (devops OR kubernetes) -is:retweet lang:en'
+  - name: "prometheus_selfhost_intent"
+    query: '(prometheus ("self-host" OR "alternatives")) -is:retweet lang:en'
+
+max_results_per_query: 100
+poll_interval_minutes: 10
+daily_read_cap: 200
