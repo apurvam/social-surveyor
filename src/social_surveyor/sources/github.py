@@ -66,6 +66,7 @@ class GitHubSource(Source):
     ) -> None:
         self.cfg = cfg
         self.storage = storage
+        self._cap_warning_logged = False
         resolved_token = token if token is not None else os.environ.get("GITHUB_TOKEN")
         if not resolved_token:
             raise SourceInitError(
@@ -84,6 +85,7 @@ class GitHubSource(Source):
 
     def fetch(self, since_id: str | None = None) -> list[RawItem]:
         self._comment_fetches_this_call = 0
+        self._cap_warning_logged = False
         items: list[RawItem] = []
 
         for gq in self.cfg.queries:
@@ -113,6 +115,7 @@ class GitHubSource(Source):
 
     def backfill(self, days: int) -> list[RawItem]:
         self._comment_fetches_this_call = 0
+        self._cap_warning_logged = False
         cutoff = (datetime.now(UTC) - timedelta(days=days)).strftime("%Y-%m-%dT%H:%M:%SZ")
         items: list[RawItem] = []
         fetched_count = 0
@@ -182,12 +185,14 @@ class GitHubSource(Source):
     ) -> list[RawItem]:
         if self._comment_fetches_this_call >= self.cfg.max_comment_fetches_per_poll:
             # Soft cap hit — stop fetching comments for this poll to
-            # protect against runaway cost.
-            log.warning(
-                "github.comments.cap_reached",
-                cap=self.cfg.max_comment_fetches_per_poll,
-                query=gq.q,
-            )
+            # protect against runaway cost. Log once per poll.
+            if not self._cap_warning_logged:
+                log.warning(
+                    "github.comments.cap_reached",
+                    cap=self.cfg.max_comment_fetches_per_poll,
+                    query=gq.q,
+                )
+                self._cap_warning_logged = True
             return []
 
         owner, repo = _parse_repo(parent_issue.get("repository_url", ""))
