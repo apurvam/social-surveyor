@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import html
+import re
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
@@ -21,6 +23,15 @@ log = structlog.get_logger(__name__)
 
 SEARCH_URL = "https://hn.algolia.com/api/v1/search_by_date"
 HN_ITEM_URL_TEMPLATE = "https://news.ycombinator.com/item?id={id_}"
+
+# Algolia returns comment and story text with HTML markup intact:
+# entities like &#x27; + inline tags like <p>, <a>. Both need cleaning
+# so the classifier sees plain text.
+_TAG_RE = re.compile(r"<[^>]+>")
+
+
+def _strip_html(text: str) -> str:
+    return html.unescape(_TAG_RE.sub("", text))
 
 
 class HackerNewsSource(Source):
@@ -151,12 +162,13 @@ class HackerNewsSource(Source):
             url = hit.get("url") or HN_ITEM_URL_TEMPLATE.format(id_=object_id)
             body = hit.get("story_text") or None
 
+        cleaned_body = _strip_html(body) if body else None
         return RawItem(
             source="hackernews",
             platform_id=object_id,
             url=url,
-            title=title,
-            body=body if body else None,
+            title=_strip_html(title),
+            body=cleaned_body or None,
             author=author,
             created_at=created_at,
             raw_json=hit,

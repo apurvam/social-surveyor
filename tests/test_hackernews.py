@@ -9,7 +9,7 @@ import httpx
 import pytest
 
 from social_surveyor.config import HackerNewsSourceConfig
-from social_surveyor.sources.hackernews import HackerNewsSource
+from social_surveyor.sources.hackernews import HackerNewsSource, _strip_html
 from social_surveyor.storage import Storage
 
 FIXTURE = Path(__file__).parent / "fixtures" / "hackernews_search.json"
@@ -159,3 +159,44 @@ def test_http_error_is_retried_and_reraised(
             source.fetch()
 
     assert call_count == 4  # stop_after_attempt(4) in the source
+
+
+def test_strip_html_unescapes_entities_and_drops_tags() -> None:
+    # Real shape observed on live Algolia in Phase B: comment_text
+    # carries both HTML entities and inline <p>/<a> tags.
+    raw = (
+        "You&#x27;re right that OBI is structural.<p>On the gRPC-as-client-layer "
+        'point, see <a href="https://example.com">this</a>.</p>'
+    )
+    cleaned = _strip_html(raw)
+    assert "&#x27;" not in cleaned
+    assert "<" not in cleaned
+    assert "You're right" in cleaned
+    assert "see this." in cleaned
+
+
+def test_fetch_cleans_comment_body_html(tmp_path: Path) -> None:
+    payload = {
+        "hits": [
+            {
+                "objectID": "99",
+                "created_at": "2026-04-17T10:00:00.000Z",
+                "created_at_i": 1776232800,
+                "author": "alice",
+                "story_id": 42,
+                "comment_text": (
+                    "We&#x27;re paying Datadog &amp; it&#x27;s expensive."
+                    "<p>Considering Thanos.</p>"
+                ),
+                "_tags": ["comment", "author_alice", "story_42"],
+            }
+        ]
+    }
+    client = _mock_client([payload])
+    with Storage(tmp_path / "t.db") as db:
+        items = HackerNewsSource(HackerNewsSourceConfig(queries=["x"]), db, client=client).fetch()
+    body = items[0].body or ""
+    assert "&#x27;" not in body
+    assert "&amp;" not in body
+    assert "<p>" not in body
+    assert "We're paying Datadog & it's expensive." in body
