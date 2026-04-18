@@ -274,6 +274,8 @@ This session also introduces a first-run setup wizard that captures required cre
 
 **Scope:** Slack integration, urgency-based routing, immediate alerts, daily digest, mark-as-handled loop, explain command.
 
+- Slack alerts include a copy-pasteable `social-surveyor label --item-id <id>` command as the last line of each alert, so users can correct misclassifications without having to remember item IDs or construct the command manually. See the "Production labeling refinement (deferred)" section for the full rationale.
+
 **Acceptance:**
 - `routing.yaml` schema: immediate threshold, digest time/timezone, channel secret references
 - Slack alerts use Block Kit: title, source, urgency, category, reasoning, URL
@@ -283,6 +285,7 @@ This session also introduces a first-run setup wizard that captures required cre
 - `social-surveyor explain --item-id <id>` prints: raw item, prefilter result, classifier input, classifier raw output, routing decision
 - `--dry-run` flag on `poll`, `classify`, `digest` — does everything except send to Slack
 - Cost kill-switch: daily caps on Haiku tokens and X reads in `routing.yaml`; pipeline halts and sends an infra alert if exceeded
+- Every Slack alert ends with a copy-pasteable label command that works when pasted directly into the user's terminal.
 
 **Non-goals:** EC2 deployment, CI/CD, author enrichment, Slack interactive buttons (CLI-only for handled).
 
@@ -389,6 +392,34 @@ Updated as sessions reveal new decisions. Current open items:
 - **Refresh policy for mutable item metadata.** `upsert_item` is insert-if-new; we never refresh comment counts, scores, issue state, etc. Fine for classification (post content is immutable) but would be nice for digest annotations ("this post now has 230 upvotes, up from 40 when we first saw it"). Revisit in Session 4 or later.
 - **Silent per-source failures.** Our multi-source poll catches exceptions and logs `poll.source.failed`, which covers crashing sources. It does *not* catch silent failures (a source that starts returning `[]` because an upstream API schema changed, or a hang where no timeout fires). Session 5's `/health` endpoint will track "last successful poll per source per project" so staleness alerts catch these; until then, eyeball the per-source row counts periodically.
 - **Category taxonomy stability.** Categories defined in Session 2.75's `categories.yaml` will be used by both the labeler and (in Session 3) the classifier. Renaming or restructuring categories after labeling has started invalidates prior labels. Treat the taxonomy as a decision to be made deliberately early and then held stable; if it must change, there should be a migration step in the change.
+
+---
+
+## Production labeling refinement (deferred)
+
+Once the classifier ships and social-surveyor is in daily use, the labeling workflow shifts from "initial bulk labeling" to "correct individual mistakes as they surface." The current Session 2.75 tool is optimized for the former; these additions serve the latter. All of these are deferred until we feel real friction in daily use, or until Session 4 brings them in naturally alongside Slack integration.
+
+**Append-only `labeled.jsonl` with timestamp precedence.** Labels should be append-only with `labeled_at` timestamps. When the eval harness reads the file, it groups by `item_id` and takes the entry with the latest `labeled_at` as the effective label. Earlier entries are retained for history/audit but don't affect eval scoring. This lets re-labeling be a simple append operation rather than a destructive edit, preserves change history, and makes Ctrl-C always safe.
+
+*State as of Session 2.75:* the write path already appends and every entry already carries `labeled_at`, so no data migration is needed. What's **not** done is the read path: `labeling.labeled_ids()` collapses to a set of item_ids with no "latest wins" logic, and `pop_last_label()` — the one-step `b`ack command — destructively truncates the last line. Moving to pure timestamp-precedence means two small code changes:
+
+- Rewrite `labeled_ids` / add a `resolve_effective_labels()` helper that groups by `item_id` and returns the entry with max `labeled_at` per group (used by eval + the queue builder).
+- Replace `pop_last_label` with an append-a-correction flow (or drop the in-loop `b`ack entirely once `--item-id` relabeling exists).
+
+**`label --item-id <id>`.** Label one specific item by its canonical ID (`{source}:{platform_id}`), bypassing the walk-through. If the item is already labeled, show the current label and prompt to confirm before appending a new (relabel) entry. This is the critical friction-killer for the "wrong alert just landed in Slack" workflow.
+
+**`label --relabel [--category <c>] [--source <n>]`.** Walk through already-labeled items instead of unlabeled ones. Useful after a taxonomy change, after the user's sense of a category shifts, or for spot-checking consistency across a category. Filters narrow the set.
+
+**Slack alerts include copy-pasteable label commands.** Every Slack alert (built in Session 4) should include at the bottom:
+
+```
+To correct this classification:
+social-surveyor label --project <n> --item-id <source>:<platform_id>
+```
+
+This makes the "see wrong alert → label correctly" loop a 30-second operation: copy command, paste in terminal, label, done. Without this, the loop requires the user to remember the item ID, find the right command, and type it — high friction, predictably skipped, eval set stagnates.
+
+**Expected timing.** Session 4 (Slack + routing) is the natural home for the copy-pasteable command, and we should do the `--item-id` and `--relabel` additions alongside it. The read-path timestamp-precedence change should land whenever we first notice label overwriting is happening, or proactively in Session 4 alongside the `--item-id` path — cheapest to change both at once.
 
 ---
 
