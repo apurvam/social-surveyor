@@ -26,9 +26,18 @@ DROP = "drop"
 REFINE = "refine"
 SKIP = "skip"
 
-_PROMPT = "[k]eep / [d]rop / [r]efine / [s]kip / [v]iew more / [q]uit: "
+_PROMPT = (
+    "[k]eep / [d]rop / [r]efine / [s]kip / [v]iew more / "
+    "<N> expand item / [q]uit: "
+)
 
 _KEY_TO_DECISION = {"k": KEEP, "d": DROP, "r": REFINE, "s": SKIP}
+
+# Default body preview length per item in a group render. Operators can
+# bump this via --preview-chars if they want a longer skim; individual
+# items can also be expanded to full body by typing their index at the
+# decision prompt.
+_DEFAULT_PREVIEW_CHARS = 300
 
 
 @dataclass
@@ -68,6 +77,7 @@ def _render_group(
     *,
     index: int,
     total_groups: int,
+    preview_chars: int = _DEFAULT_PREVIEW_CHARS,
 ) -> str:
     per_day = total / max(1, days)
     lines: list[str] = [
@@ -79,12 +89,36 @@ def _render_group(
     for i, item in enumerate(items, start=1):
         title = (item.get("title") or "(no title)").replace("\n", " ")
         body = (item.get("body") or "").replace("\n", " ").strip()
-        preview = body[:120]
-        if len(body) > 120:
+        preview = body[:preview_chars]
+        if len(body) > preview_chars:
             preview += "…"
-        lines.append(f"  {i}. {title[:100]}")
+        lines.append(f"  {i}. {title[:160]}")
         if preview:
             lines.append(f"       {preview}")
+    lines.append("")
+    return "\n".join(lines)
+
+
+def _render_expanded(item: dict[str, Any]) -> str:
+    """Full-body expansion of a single item, triggered by typing its index.
+
+    Preserves newlines (unlike the group preview which flattens to one
+    line per item) so multi-paragraph bodies are readable.
+    """
+    title = item.get("title") or "(no title)"
+    author = item.get("author") or "(anonymous)"
+    url = item.get("url") or "(no url)"
+    body = (item.get("body") or "(empty body)").strip()
+    lines: list[str] = [
+        "",
+        "-- expanded --",
+        f"Title:  {title}",
+        f"Author: {author}",
+        f"URL:    {url}",
+        "Body:",
+    ]
+    body_lines = body.splitlines() or [body]
+    lines.extend(f"  {bl}" for bl in body_lines)
     lines.append("")
     return "\n".join(lines)
 
@@ -97,6 +131,7 @@ def run_triage(
     source_filter: str | None,
     limit: int,
     window_days: int = 30,
+    preview_chars: int = _DEFAULT_PREVIEW_CHARS,
     input_fn=input,
     echo_fn=typer.echo,
     now: datetime | None = None,
@@ -147,6 +182,7 @@ def run_triage(
                         window_days,
                         index=idx,
                         total_groups=total_groups,
+                        preview_chars=preview_chars,
                     )
                 )
                 raw = input_fn(_PROMPT).strip().lower()
@@ -156,9 +192,22 @@ def run_triage(
                 if raw == "v":
                     offset += limit
                     continue
+                # Digit → expand the Nth item in the current page to full body.
+                if raw.isdigit():
+                    i = int(raw) - 1
+                    if 0 <= i < len(sample):
+                        echo_fn(_render_expanded(sample[i]))
+                    else:
+                        echo_fn(
+                            f"  {raw!r} out of range; expand index 1-{len(sample)}"
+                        )
+                    continue
                 decision = _KEY_TO_DECISION.get(raw)
                 if decision is None:
-                    echo_fn(f"  unknown choice {raw!r}; expected one of: k d r s v q")
+                    echo_fn(
+                        f"  unknown choice {raw!r}; expected one of: "
+                        f"k d r s v q or a digit 1-{len(sample)}"
+                    )
                     continue
 
                 decisions.append(

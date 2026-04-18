@@ -401,6 +401,17 @@ def triage(
         int,
         typer.Option("--window-days", min=1, help="How far back to pull samples."),
     ] = 30,
+    preview_chars: Annotated[
+        int,
+        typer.Option(
+            "--preview-chars",
+            min=0,
+            help=(
+                "Body-preview length per item. Default 300. During the loop, "
+                "type an item index (1..N) to expand that one to full body."
+            ),
+        ),
+    ] = 300,
 ) -> None:
     """Walk query groups newest-first and record keep/drop/refine decisions.
 
@@ -417,6 +428,7 @@ def triage(
             source_filter=source,
             limit=limit,
             window_days=window_days,
+            preview_chars=preview_chars,
         )
     except typer.BadParameter as e:
         typer.echo(str(e), err=True)

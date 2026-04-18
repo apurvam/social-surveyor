@@ -260,3 +260,128 @@ def test_triage_errors_cleanly_when_db_missing(tmp_path: Path) -> None:
     missing = tmp_path / "data" / "nope.db"
     with pytest.raises(typer.BadParameter):
         run_triage("demo", missing, tmp_path, source_filter=None, limit=5)
+
+
+def test_triage_digit_expands_item_full_body(tmp_path: Path) -> None:
+    """Typing an item index expands that item to full body, then re-prompts."""
+    # Seed a single group with one item that has a long multi-paragraph body.
+    long_body = "First paragraph.\n\nSecond paragraph with more detail.\n\nThird."
+    now = datetime(2026, 4, 17, 12, 0, tzinfo=UTC)
+    db_path = tmp_path / "data" / "demo.db"
+    with Storage(db_path) as db:
+        db.upsert_item(
+            RawItem(
+                source="hackernews",
+                platform_id="99",
+                url="https://example.com/99",
+                title="Long post title",
+                body=long_body,
+                author="alice",
+                created_at=now,
+                raw_json={"group_key": "hackernews:q1"},
+            )
+        )
+
+    # Expand item 1, then keep.
+    script = _Script(["1", "k"])
+    run_triage(
+        "demo",
+        db_path,
+        tmp_path,
+        source_filter=None,
+        limit=5,
+        preview_chars=20,  # deliberately tight to prove expand shows more
+        input_fn=script.input,
+        echo_fn=script.echo,
+    )
+
+    echoed = "\n".join(script.echoed)
+    # The preview truncated after 20 chars (ends with an ellipsis), so the
+    # full body only appears via the expand path.
+    assert "-- expanded --" in echoed
+    assert "First paragraph." in echoed
+    assert "Second paragraph with more detail." in echoed
+    assert "Third." in echoed
+
+
+def test_triage_digit_out_of_range_is_handled(tmp_path: Path) -> None:
+    db_path = _seed(tmp_path, {"hackernews:q1": 2})
+    # Item 99 doesn't exist; should re-prompt, then keep.
+    script = _Script(["99", "k"])
+    run_triage(
+        "demo",
+        db_path,
+        tmp_path,
+        source_filter=None,
+        limit=5,
+        input_fn=script.input,
+        echo_fn=script.echo,
+    )
+    echoed = "\n".join(script.echoed)
+    assert "out of range" in echoed
+
+
+def test_triage_preview_chars_controls_body_truncation(tmp_path: Path) -> None:
+    """--preview-chars 10 shows ~10 chars; --preview-chars 500 shows more."""
+    long_body = "x" * 400
+    now = datetime(2026, 4, 17, 12, 0, tzinfo=UTC)
+    db_path = tmp_path / "data" / "demo.db"
+    with Storage(db_path) as db:
+        db.upsert_item(
+            RawItem(
+                source="hackernews",
+                platform_id="1",
+                url="https://example.com/1",
+                title="t",
+                body=long_body,
+                author="a",
+                created_at=now,
+                raw_json={"group_key": "hackernews:q1"},
+            )
+        )
+
+    short_script = _Script(["k"])
+    run_triage(
+        "demo",
+        db_path,
+        tmp_path,
+        source_filter=None,
+        limit=5,
+        preview_chars=10,
+        input_fn=short_script.input,
+        echo_fn=short_script.echo,
+    )
+    short_out = "\n".join(short_script.echoed)
+    # With 10-char preview, the body render shows ~10 x's then an ellipsis.
+    # Count runs of x's to confirm the preview respected the cap.
+    assert "xxxxxxxxxx…" in short_out  # 10 x's + ellipsis
+    assert "xxxxxxxxxxx" not in short_out  # never 11+ x's in a run
+
+    long_script = _Script(["k"])
+    long_db = tmp_path / "data" / "demo_long.db"
+    with Storage(long_db) as db:
+        db.upsert_item(
+            RawItem(
+                source="hackernews",
+                platform_id="1",
+                url="https://example.com/1",
+                title="t",
+                body=long_body,
+                author="a",
+                created_at=now,
+                raw_json={"group_key": "hackernews:q1"},
+            )
+        )
+    run_triage(
+        "demo",
+        long_db,
+        tmp_path,
+        source_filter=None,
+        limit=5,
+        preview_chars=500,
+        input_fn=long_script.input,
+        echo_fn=long_script.echo,
+    )
+    long_out = "\n".join(long_script.echoed)
+    # With 500 chars, the whole 400-char body fits, no truncation marker.
+    assert "x" * 400 in long_out
