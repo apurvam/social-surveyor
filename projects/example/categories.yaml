@@ -1,0 +1,50 @@
+# Category taxonomy + urgency scale for a project.
+#
+# Read by the Session 2.75 labeler and extended (not redefined) by
+# Session 3's classifier.yaml. Keep the `id` values stable once you
+# start labeling — renaming a category invalidates prior labels.
+#
+# For a fork: replace these categories with ones that match your ICP.
+
+version: 1
+
+categories:
+  - id: cost_complaint
+    label: "Observability cost complaint"
+    description: >
+      Actively complaining about the cost of their observability stack
+      (Datadog, New Relic, Grafana Cloud, etc.).
+  - id: self_host_intent
+    label: "Self-host Prometheus intent"
+    description: >
+      Asking about or actively evaluating running their own Prometheus
+      with durable storage.
+  - id: competitor_pain
+    label: "Competitor operational pain"
+    description: >
+      Complaining about Mimir, Thanos, Cortex, VictoriaMetrics
+      operational complexity.
+  - id: neutral_discussion
+    label: "Neutral topic discussion"
+    description: >
+      General discussion of the topic space, not a pain point or active
+      evaluation.
+  - id: tutorial_or_marketing
+    label: "Tutorial or vendor marketing"
+    description: >
+      Content produced to teach or promote rather than to discuss pain.
+  - id: off_topic
+    label: "Off topic"
+    description: >
+      Matched our queries but isn't actually relevant to the problem
+      space.
+
+urgency_scale:
+  - range: [0, 3]
+    meaning: "Irrelevant or passive mention, don't alert"
+  - range: [4, 6]
+    meaning: "Relevant discussion but not a high-leverage engagement opportunity"
+  - range: [7, 8]
+    meaning: "Good engagement opportunity — person is actively discussing the problem"
+  - range: [9, 10]
+    meaning: "Urgent — person is explicitly asking for a solution or evaluating vendors right now"

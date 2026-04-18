@@ -116,6 +116,34 @@ class XSourceConfig(SourceConfig):
     )
 
 
+class Category(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    id: str = Field(..., min_length=1, pattern=r"^[a-z][a-z0-9_]*$")
+    label: str = Field(..., min_length=1)
+    description: str = Field(..., min_length=1)
+
+
+class UrgencyBand(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    range: list[int] = Field(..., min_length=2, max_length=2)
+    meaning: str = Field(..., min_length=1)
+
+
+class CategoryConfig(BaseModel):
+    """Project-level category taxonomy and urgency scale.
+
+    Read by the Session 2.75 labeler and (later) extended by
+    Session 3's ``classifier.yaml``. Keep stable once labeling starts —
+    renaming a category invalidates prior labels.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    version: int = Field(default=1, ge=1)
+    categories: list[Category] = Field(..., min_length=1)
+    urgency_scale: list[UrgencyBand] = Field(..., min_length=1)
+
+
 class ProjectConfig(BaseModel):
     """Aggregated config for a single project.
 
@@ -193,3 +221,27 @@ def load_project_config(
         return ProjectConfig.model_validate(data)
     except ValidationError as e:
         raise ConfigError(_format_validation_error(project_dir, e)) from e
+
+
+def load_categories(
+    project: str,
+    projects_root: Path | str = "projects",
+) -> CategoryConfig:
+    """Load the per-project category + urgency taxonomy.
+
+    Raises :class:`ConfigError` with a human-readable message if the file
+    is missing or fails validation.
+    """
+    root = Path(projects_root)
+    path = root / project / "categories.yaml"
+    if not path.is_file():
+        raise ConfigError(
+            f"project '{project}' has no categories.yaml at {path}; "
+            f"run `social-surveyor setup --project {project}` or copy "
+            f"projects/example/categories.yaml as a starting point"
+        )
+    data = _load_yaml(path)
+    try:
+        return CategoryConfig.model_validate(data)
+    except ValidationError as e:
+        raise ConfigError(_format_validation_error(path, e)) from e
