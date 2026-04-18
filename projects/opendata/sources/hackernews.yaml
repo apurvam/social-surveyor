@@ -16,8 +16,10 @@ queries:
   - "self host prometheus"
   - "prometheus retention"
 
-  # Competitor mentions
-  - "thanos"
+  # Competitor mentions. "thanos" alone collides with Marvel discourse
+  # even on HN; pairing with prometheus disambiguates. Same pattern is
+  # why "cortex prometheus" and "mimir prometheus" are phrased this way.
+  - "thanos prometheus"
   - "mimir prometheus"
   - "cortex prometheus"
   - "victoriametrics"

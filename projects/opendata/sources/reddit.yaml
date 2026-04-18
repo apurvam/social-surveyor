@@ -18,10 +18,12 @@ reddit_username: amehta1618
 min_seconds_between_requests: 6.0
 
 subreddits:
+  # r/selfhosted dropped in Session 2.75 triage: every (selfhosted,
+  # query) pair was DROPped — the subreddit culture is homelab
+  # enthusiasts, not ops teams with observability budgets.
   - devops
   - kubernetes
   - sre
-  - selfhosted
   - PrometheusMonitoring
   - observability
   - grafana

@@ -263,3 +263,38 @@ def test_query_tokens_drops_operators_and_short_words() -> None:
 def test_body_matches_any_token_case_insensitive() -> None:
     assert _body_matches_any_token("We switched to Thanos last week.", ["thanos"])
     assert not _body_matches_any_token("Nothing relevant here.", ["thanos", "mimir"])
+
+
+def test_query_tokens_strips_org_qualifier_values() -> None:
+    # Regression: without qualifier stripping, "org:prometheus" leaked
+    # `org` (matching "organization", "reorg") and `prometheus` (matching
+    # any comment that happens to name the project) as content tokens.
+    q = "victoriametrics (org:prometheus OR org:grafana OR org:thanos-io OR org:cortexproject)"
+    tokens = _query_tokens(q)
+    assert tokens == ["victoriametrics"]
+    assert "org" not in tokens
+    assert "prometheus" not in tokens
+    assert "grafana" not in tokens
+    assert "thanos-io" not in tokens
+
+
+def test_query_tokens_strips_in_and_is_qualifiers() -> None:
+    tokens = _query_tokens("thanos in:comments -is:pr")
+    assert tokens == ["thanos"]
+    assert "comments" not in tokens
+    assert "is" not in tokens
+
+
+def test_query_tokens_strips_type_and_created_qualifiers() -> None:
+    tokens = _query_tokens('"cardinality explosion" type:issue created:>2024-01-01')
+    assert set(tokens) == {"cardinality", "explosion"}
+
+
+def test_query_tokens_preserves_content_next_to_qualifiers() -> None:
+    # Qualifier stripping is surgical — surrounding content survives.
+    tokens = _query_tokens("datadog bill org:prometheus hidden costs")
+    assert "datadog" in tokens
+    assert "bill" in tokens
+    assert "hidden" in tokens
+    assert "costs" in tokens
+    assert "prometheus" not in tokens  # stripped from qualifier

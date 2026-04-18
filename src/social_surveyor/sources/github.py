@@ -29,6 +29,12 @@ SEARCH_PATH = "/search/issues"
 # filtering. Strip these before tokenizing.
 _STOPWORDS = frozenset({"OR", "AND", "NOT", "IN", "TO", "BY", "THE", "A", "AN"})
 _TOKEN_RE = re.compile(r"[A-Za-z0-9_-]{3,}")
+# Strip GitHub search qualifiers like ``org:prometheus``, ``in:comments``,
+# ``-is:retweet``, ``type:issue``, ``created:>2024-01-01`` before we tokenize
+# for client-side comment matching — otherwise qualifier prefixes (``org``,
+# ``in``, ``is``) and values (``prometheus``, ``grafana``) leak in as spurious
+# content tokens and match half the internet.
+_QUALIFIER_RE = re.compile(r"-?\w+:\S+")
 _REPO_URL_RE = re.compile(r"^https://api\.github\.com/repos/([^/]+)/([^/]+)$")
 
 
@@ -344,10 +350,16 @@ def _owner_for_item(item: RawItem) -> str | None:
 def _query_tokens(q: str) -> list[str]:
     """Extract substring-matchable tokens from a GitHub search query.
 
-    Boolean operators and short fillers are dropped. Returns lowercase
-    tokens; callers should lowercase the haystack too.
+    GitHub search qualifiers (``org:foo``, ``in:comments``,
+    ``-is:retweet``, ``type:issue``, ``created:>2024-01-01``) are
+    stripped before tokenizing so their prefixes (``org``, ``in``,
+    ``is``) don't leak in as spurious content tokens. Boolean
+    operators and short fillers are dropped via the stopword list.
+    Returns lowercase tokens; callers should lowercase the haystack
+    too.
     """
-    raw = _TOKEN_RE.findall(q)
+    cleaned = _QUALIFIER_RE.sub(" ", q)
+    raw = _TOKEN_RE.findall(cleaned)
     return [t.lower() for t in raw if t.upper() not in _STOPWORDS]
 
 
