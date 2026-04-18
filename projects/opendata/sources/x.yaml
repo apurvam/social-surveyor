@@ -13,6 +13,8 @@ queries:
   - name: "competitor_pain"
     query: '(mimir OR thanos OR cortex) (complex OR pain OR nightmare OR expensive) -is:retweet lang:en'
 
-max_results_per_query: 100
+max_results_per_query: 20
 poll_interval_minutes: 10
-daily_read_cap: 500
+# Phase B4: lowered temporarily from 500 to 20 for initial live
+# verification. Restored after the first poll confirms sane behavior.
+daily_read_cap: 20
