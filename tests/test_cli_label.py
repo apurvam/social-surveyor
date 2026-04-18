@@ -129,9 +129,7 @@ def test_label_resume_skips_already_labeled(tmp_path: Path) -> None:
     labels_file = ensure_labels_file("demo", projects_root=root)
     append_label(
         labels_file,
-        make_entry(
-            item_id="hackernews:100", category="cost_complaint", urgency=7, note=None
-        ),
+        make_entry(item_id="hackernews:100", category="cost_complaint", urgency=7, note=None),
     )
 
     script = _Script(["q"])  # quit immediately

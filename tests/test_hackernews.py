@@ -185,8 +185,7 @@ def test_fetch_cleans_comment_body_html(tmp_path: Path) -> None:
                 "author": "alice",
                 "story_id": 42,
                 "comment_text": (
-                    "We&#x27;re paying Datadog &amp; it&#x27;s expensive."
-                    "<p>Considering Thanos.</p>"
+                    "We&#x27;re paying Datadog &amp; it&#x27;s expensive.<p>Considering Thanos.</p>"
                 ),
                 "_tags": ["comment", "author_alice", "story_42"],
             }

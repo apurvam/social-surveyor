@@ -194,9 +194,7 @@ class RedditSource(Source):
             "limit": self.cfg.limit_per_query,
         }
         url = SEARCH_URL_TEMPLATE.format(subreddit=subreddit) + "?" + urlencode(params)
-        return self._fetch_url(
-            url, subreddit=subreddit, group_key=f"reddit:r/{subreddit}/{query}"
-        )
+        return self._fetch_url(url, subreddit=subreddit, group_key=f"reddit:r/{subreddit}/{query}")
 
     def _fetch_new(self, subreddit: str) -> list[RawItem]:
         url = (
@@ -204,9 +202,7 @@ class RedditSource(Source):
             + "?"
             + urlencode({"limit": self.cfg.limit_per_query})
         )
-        return self._fetch_url(
-            url, subreddit=subreddit, group_key=f"reddit:r/{subreddit}/(new)"
-        )
+        return self._fetch_url(url, subreddit=subreddit, group_key=f"reddit:r/{subreddit}/(new)")
 
     def _fetch_url(self, url: str, *, subreddit: str, group_key: str) -> list[RawItem]:
         body = self._get_with_retry(url)
@@ -230,8 +226,7 @@ class RedditSource(Source):
             )
             return []
         return [
-            _entry_to_raw_item(e, subreddit=subreddit, group_key=group_key)
-            for e in parsed.entries
+            _entry_to_raw_item(e, subreddit=subreddit, group_key=group_key) for e in parsed.entries
         ]
 
     @retry(
@@ -272,9 +267,7 @@ class RedditSource(Source):
                     "reddit.rate_limited.unknown_reset",
                     url=url,
                     headers={
-                        k: v
-                        for k, v in resp.headers.items()
-                        if k.lower().startswith("x-ratelimit")
+                        k: v for k, v in resp.headers.items() if k.lower().startswith("x-ratelimit")
                     },
                 )
         resp.raise_for_status()

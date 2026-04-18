@@ -90,9 +90,7 @@ def run_stats(project: str, db_path: Path, projects_root: Path) -> str:
     if labels_file.exists():
         lines.append(f"  file: {labels_file}")
     else:
-        lines.append(
-            f"  (no labels file yet — run `social-surveyor label --project {project}`)"
-        )
+        lines.append(f"  (no labels file yet — run `social-surveyor label --project {project}`)")
     # Hint on the unknown bucket if it's the top group
     if top and top[0][0] == Storage._UNKNOWN_GROUP:
         lines.append("")

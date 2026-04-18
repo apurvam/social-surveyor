@@ -98,9 +98,7 @@ def run_triage(
     Returns the path to the generated report file.
     """
     if not db_path.is_file():
-        raise typer.BadParameter(
-            f"no DB at {db_path} yet — run a poll first"
-        )
+        raise typer.BadParameter(f"no DB at {db_path} yet — run a poll first")
 
     now = now or datetime.now(UTC)
     window_start = now - timedelta(days=window_days)
@@ -135,12 +133,8 @@ def run_triage(
                 echo_fn(_render_group(group_key, sample, total, window_days))
                 raw = input_fn(_PROMPT).strip().lower()
                 if raw == "q":
-                    decisions.append(
-                        Decision(group_key=group_key, decision=SKIP, item_count=total)
-                    )
-                    return _write_report(
-                        project, projects_root, now, decisions, aborted=True
-                    )
+                    decisions.append(Decision(group_key=group_key, decision=SKIP, item_count=total))
+                    return _write_report(project, projects_root, now, decisions, aborted=True)
                 if raw == "v":
                     offset += limit
                     continue
@@ -155,8 +149,7 @@ def run_triage(
                         decision=decision,
                         item_count=total,
                         sample_titles=[
-                            (it.get("title") or "(no title)").strip()
-                            for it in sample[:5]
+                            (it.get("title") or "(no title)").strip() for it in sample[:5]
                         ],
                     )
                 )
@@ -240,12 +233,8 @@ def _suggested_yaml_changes(decisions: list[Decision]) -> list[str]:
         out.append(f"### `projects/<project>/sources/{source}.yaml` — DROP")
         out.append("")
         if source == "reddit":
-            dropped_subs = sorted(
-                {_parse_group_key(d.group_key)[1] or "?" for d in drops}
-            )
-            dropped_qs = sorted(
-                {_parse_group_key(d.group_key)[2] for d in drops}
-            )
+            dropped_subs = sorted({_parse_group_key(d.group_key)[1] or "?" for d in drops})
+            dropped_qs = sorted({_parse_group_key(d.group_key)[2] for d in drops})
             out.append("Consider removing these subreddit / query pairs:")
             out.append("```")
             for d in drops:

@@ -171,9 +171,7 @@ def run_label(
     labels_file = ensure_labels_file(project, projects_root=projects_root)
 
     if not db_path.is_file():
-        raise typer.BadParameter(
-            f"no DB at {db_path} yet — run a poll first"
-        )
+        raise typer.BadParameter(f"no DB at {db_path} yet — run a poll first")
 
     with Storage(db_path) as db:
         queue = _build_queue(db, labels_file, source, randomize)

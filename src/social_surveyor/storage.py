@@ -229,9 +229,7 @@ class Storage:
             ).fetchall()
         return {r["source"]: int(r["c"]) for r in rows}
 
-    def count_items_by_group(
-        self, since: datetime | None = None
-    ) -> list[tuple[str, int]]:
+    def count_items_by_group(self, since: datetime | None = None) -> list[tuple[str, int]]:
         """Items per ``raw_json.group_key``, newest-first by count.
 
         Pre-``group_key`` items are surfaced under the literal
@@ -269,15 +267,12 @@ class Storage:
             ).fetchall()
         else:
             rows = self._conn.execute(
-                "SELECT source, platform_id FROM items "
-                "WHERE source = ? ORDER BY created_at DESC",
+                "SELECT source, platform_id FROM items WHERE source = ? ORDER BY created_at DESC",
                 (source,),
             ).fetchall()
         return [f"{r['source']}:{r['platform_id']}" for r in rows]
 
-    def get_item_by_id(
-        self, source: str, platform_id: str
-    ) -> dict[str, Any] | None:
+    def get_item_by_id(self, source: str, platform_id: str) -> dict[str, Any] | None:
         row = self._conn.execute(
             "SELECT * FROM items WHERE source = ? AND platform_id = ?",
             (source, platform_id),

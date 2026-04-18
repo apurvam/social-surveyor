@@ -14,6 +14,7 @@ from dotenv import load_dotenv
 
 from . import __version__
 from .cli_label import run_label
+from .cli_setup import run_setup
 from .cli_stats import run_stats
 from .cli_triage import run_triage
 from .config import ConfigError, ProjectConfig, load_project_config
@@ -348,7 +349,9 @@ def label(
         # builder still uses the labeled-ids set, so --no-resume is
         # effectively identical to --resume today. Left as a knob for
         # future "start fresh" semantics (e.g., relabel from scratch).
-        typer.echo("(--no-resume is currently equivalent to --resume; items in labeled.jsonl are always skipped)")
+        typer.echo(
+            "(--no-resume is currently equivalent to --resume; items in labeled.jsonl are always skipped)"
+        )
     try:
         result = run_label(
             project,
@@ -364,6 +367,23 @@ def label(
         f"\ndone — labeled={result['labeled']} skipped={result['skipped']} "
         f"remaining={result['remaining']}"
     )
+
+
+@app.command()
+def setup(
+    project: Annotated[str, typer.Option("--project", help="Project name.")],
+) -> None:
+    """Interactive wizard: capture credentials, write .env, set reddit_username.
+
+    No paid API calls. GitHub + Reddit validations are free (one
+    request each); X and Anthropic are syntactic-only because every
+    setup run making a paid call is the wrong pattern to build in.
+    """
+    try:
+        run_setup(project, Path("projects"), Path(".env"))
+    except typer.BadParameter as e:
+        typer.echo(str(e), err=True)
+        raise typer.Exit(code=2) from None
 
 
 @app.command()
