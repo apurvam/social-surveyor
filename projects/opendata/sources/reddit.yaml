@@ -11,7 +11,7 @@
 # builds a polite User-Agent. Replace the placeholder with apurva's
 # actual Reddit username before running live.
 
-reddit_username: YOUR_REDDIT_USERNAME
+reddit_username: amehta1618
 min_seconds_between_requests: 2.0
 
 subreddits:
