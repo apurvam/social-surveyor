@@ -20,6 +20,7 @@ queries:
   - "thanos"
   - "mimir prometheus"
   - "cortex prometheus"
+  - "victoriametrics"
 
 tags: ["story", "comment"]
 max_results_per_query: 50

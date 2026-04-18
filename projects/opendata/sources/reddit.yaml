@@ -45,6 +45,7 @@ queries:
   - "thanos"
   - "mimir"
   - "cortex prometheus"
+  - "victoriametrics"
 
 limit_per_query: 100
 time_filter: week

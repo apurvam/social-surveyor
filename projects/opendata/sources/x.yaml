@@ -11,7 +11,7 @@ queries:
     query: '(prometheus ("self-host" OR "long-term storage" OR "durable")) -is:retweet lang:en'
 
   - name: "competitor_pain"
-    query: '(mimir OR thanos OR cortex) (complex OR pain OR nightmare OR expensive) -is:retweet lang:en'
+    query: '(mimir OR thanos OR cortex OR victoriametrics) (complex OR pain OR nightmare OR expensive) -is:retweet lang:en'
 
 max_results_per_query: 100
 poll_interval_minutes: 10
