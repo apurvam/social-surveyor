@@ -153,33 +153,48 @@ Each session is a focused Claude Code working session producing a reviewable dif
 
 ### Session 2.5 — Reddit RSS refactor + live verification
 
+**Status:** Complete, merged. Phase B5/B6 (multi-source + since_id-twice) skipped by mutual agreement after B1-B4 proved every acceptance criterion individually — full end-to-end orchestration coverage comes from the existing `test_cli_multi_source.py` unit test and will be hardened in Session 5 via per-source staleness alerts on the `/health` endpoint.
+
 **Context:** Reddit closed self-service API access in November 2025 under the "Responsible Builder Policy." New API approvals take weeks and are not guaranteed for personal monitoring tools. RSS feeds remain available without authentication and provide sufficient coverage for our use case, at the cost of narrower backfill depth and no comment coverage.
 
-**Scope:**
+**Scope as built:**
 
 Phase A — Reddit RSS refactor:
-- Rename existing `sources/reddit.py` to `sources/reddit_api.py` (preserved for future re-enablement)
-- Write new `sources/reddit.py` that uses httpx + feedparser against Reddit's RSS endpoints
-- Same config shape as before, plus new required field: `reddit_username` (used for polite User-Agent)
-- `backfill` is best-effort against whatever RSS returns (typically 25–100 most-recent items per feed); log a warning when the returned window is narrower than `--days N` requested
-- Inter-request throttle (default 2s between subreddit fetches) to stay well under RSS rate limits
-- Tests use httpx MockTransport with fixtures of real Reddit RSS responses
+- Renamed `sources/reddit.py` → `sources/reddit_api.py` (dormant, history preserved)
+- New `sources/reddit.py` uses httpx + feedparser against per-subreddit search RSS, with a polite User-Agent (`social-surveyor/<version> (by /u/<username>)`) and a per-instance throttle
+- `reddit_username` added as a required config field; `min_seconds_between_requests` optional (default tuned live to 6s — see Phase B findings)
+- `backfill` is best-effort against whatever RSS returns; logs `backfill.window_narrower_than_requested` when the oldest item is newer than the requested window
+- Tests use httpx MockTransport with a scaffolded Atom fixture in `tests/fixtures/reddit_search_devops.xml`
 
-Phase B — Live verification across all four sources:
-- Verify each source in cost-ascending order: HN → Reddit → GitHub → X
-- For X: temporarily lower `daily_read_cap` to 20 for initial verification, bump to 500 after confirming sane behavior
-- Fix any real-world bugs discovered (expect 2–5 real issues across sources; this is the whole point)
-- Populate `data/opendata.db` with a real dataset ready for hand-labeling
+Phase B — live verification fixed three real-world bugs:
 
-**Acceptance:**
-- `social-surveyor poll --project opendata --source reddit` works without any Reddit API credentials, only requiring the User-Agent config
-- `social-surveyor poll --project opendata` runs all four sources sequentially; failures in one source are logged but do not block others
-- After verification: `sqlite3 data/opendata.db 'select source, count(*) from items group by source'` shows material rows across all four sources (target: 500+ total items)
-- HN, GitHub, and X `since_id` / cursor behavior confirmed — running `poll` twice in succession returns zero new items from those sources on the second run
-- `usage --source x` reports correct month-to-date X read totals
-- `--dry-run` for X confirmed to make zero API calls (Claude Code asserted this in tests; verify once with real token present in env that it still holds)
-- PLAN.md updated with any new open questions discovered during live testing
-- Reddit Responsible Builder request filed in parallel (outside the code deliverable); filing date tracked in Open Questions
+1. **HN bodies leaked HTML entities and inline tags** (`&#x27;`, `<p>`, `<a>`). Algolia returns `comment_text` and `story_text` with markup intact; we now `_strip_html` both title and body before storage. Fixture tests use clean strings so only live data exposed this.
+
+2. **Reddit's unauthenticated bucket is ~100 requests per ~10 minutes.** The 2s throttle burned it in ~200s and every subsequent request 429'd. Fix: default bumped to 6s (matches the bucket rate) plus explicit `x-ratelimit-reset` handling — on a 429 the source sleeps for the header value (capped at 900s) before letting tenacity retry, since tenacity's 30s ceiling can't recover from a ~5-minute reset. Verified live: the re-poll's first request 429'd (leftover from the earlier burst), slept 156s, and completed the rest of the poll with zero further 429s.
+
+3. **`github.comments.cap_reached` fired per-issue-after-cap** (~40 spurious warnings per poll). Now guarded by a `_cap_warning_logged` flag; logs exactly once per poll.
+
+Final DB after Phase B (ready for hand-labeling in Session 3):
+
+| source      | rows |
+|-------------|------|
+| github      | 772  |
+| hackernews  | 536  |
+| reddit      | 120  |
+| x           | 105  |
+| **total**   | **1,533** |
+
+X spend during Phase B: **106 reads × $0.005 = $0.53**.
+
+**Acceptance (all met except as noted):**
+- [x] `social-surveyor poll --project opendata --source reddit` works with no Reddit API credentials
+- [x] ~~Multi-source `poll` without `--source`~~ covered by unit tests; live multi-source skipped (see Status above)
+- [x] `data/opendata.db` has material rows across all four sources (target 500+; got 1,533)
+- [x] HN, GitHub, X cursor behavior confirmed via back-to-back polls returning 0 new items
+- [x] `usage --source x` reports correct totals
+- [x] `--dry-run` for X confirmed to make zero API calls live (belt-and-suspenders on top of the unit test)
+- [x] PLAN.md updated with new open questions (see Open Questions below)
+- [ ] Reddit Responsible Builder request filed — *operator task, not coded; tracked as an open question*
 
 **Non-goals:** New sources, classifier work, Slack integration. This session is cleanup and proof.
 
@@ -328,16 +343,18 @@ Updated as sessions reveal new decisions. Current open items:
 
 - **Reddit API approval via Responsible Builder Policy.** Filed on `<DATE TO BE FILLED>`, status TBD. When/if approved, switch `sources/reddit.py` to use the preserved PRAW-based `sources/reddit_api.py` for better comment coverage and deeper backfill. Until then, RSS is the source of truth for Reddit.
 - **Reddit comment coverage gap.** RSS gives us posts only, no comments. For devops/SRE discussion specifically, comment-level signal is often richer than post-level. If the classifier shows meaningful misses traceable to this gap, consider per-post comment RSS fetches (expensive) or wait for API approval.
+- **Reddit RSS bucket rate and throttle tuning.** Observed live in Session 2.5 Phase B: Reddit's unauthenticated bucket is ~100 requests per ~10 minutes. We default `min_seconds_between_requests` to 6.0s to stay under that, plus honor `x-ratelimit-reset` on any 429 that slips through. If the bucket size changes (Reddit has been tightening throttles periodically), we'll see it as `reddit.rate_limited.backing_off` warnings in logs — first check whether the default should move again.
 - **GitHub dry-run rate-limit consumption.** Because dry-run still performs comment fetches, it eats from the same 5k/hr search budget. Watch this during Session 2.5 live testing; if it causes pain, add a `max_comments_in_dry_run` knob or subsample.
 - **GitHub comment matching precision.** Best-effort substring, case-insensitive, stopwords dropped. The `github.comments.fetched` log line with `comments_total` vs `comments_matched` is the diagnostic. Revisit if precision suffers during Session 3 eval.
 - **X full-archive search (`/2/tweets/search/all`).** Different tier, different pricing. Backfill clamped to Recent Search's 7-day window. Revisit in Session 5+ once we see what 7 days of X tweets does for the classifier.
 - **Schema migrations.** We now have `items`, `source_cursors`, `api_usage`. Sessions 3 and 4 add `classifications` and `alerts` respectively — both additive, fine under `CREATE TABLE IF NOT EXISTS`. The first structural change to an existing column will need a proper migration story; defer building that framework until we need it (probably never in MVP).
-- **X API authentication flow in pay-per-use:** verify pay-per-use access still works on apurva's account before Session 2.5 Phase B. Fallback: legacy Basic tier ($200/mo) if pay-per-use has been revoked or changed.
+- **X API authentication flow in pay-per-use:** resolved in Session 2.5 Phase B. Pay-per-use works on apurva's account with a standard bearer token; 106 reads total during verification for $0.53. The `daily_read_cap` pre-call check, `api_usage` ledger, and `usage` CLI all behaved as designed live. No fallback to the legacy Basic tier needed.
 - **Slack interactive buttons vs CLI-only handled:** the Slack button approach requires exposing an HTTPS endpoint to Slack, which complicates the EC2 SG setup. CLI-only (`social-surveyor handled <id>`) is the MVP choice. Revisit after Session 5 if the CLI workflow feels clunky in daily use.
 - **Rate limit for Anthropic API calls:** during backfill operations we could hit Anthropic's tier-based rate limits. Need concurrency control in `classifier.py` — single worker with configurable RPS cap is simplest.
 - **Eval set size:** 50 items is the starting target; real accuracy tuning may need 200+. Budget time in Session 3 for hand-labeling to keep pace.
 - **Multi-project conflicts:** if two projects poll the same subreddit, we fetch and store twice. Acceptable for now (different projects have different classifiers, different storage). Revisit if it becomes a cost issue.
 - **Refresh policy for mutable item metadata.** `upsert_item` is insert-if-new; we never refresh comment counts, scores, issue state, etc. Fine for classification (post content is immutable) but would be nice for digest annotations ("this post now has 230 upvotes, up from 40 when we first saw it"). Revisit in Session 4 or later.
+- **Silent per-source failures.** Our multi-source poll catches exceptions and logs `poll.source.failed`, which covers crashing sources. It does *not* catch silent failures (a source that starts returning `[]` because an upstream API schema changed, or a hang where no timeout fires). Session 5's `/health` endpoint will track "last successful poll per source per project" so staleness alerts catch these; until then, eyeball the per-source row counts periodically.
 
 ---
 
