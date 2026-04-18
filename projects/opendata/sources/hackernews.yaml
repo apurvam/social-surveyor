@@ -32,7 +32,14 @@ queries:
   # triage — low volume and the disambiguation was still over-matching.
   - "mimir prometheus"
   - "cortex prometheus"
+  # Two spellings of the same product. Algolia tokenizes on whitespace
+  # so these queries don't overlap — a doc with "Victoria Metrics" won't
+  # match the single-token query and vice versa. Measured live: 614 hits
+  # for the compact form, 84 for the spaced form, only 12 in the
+  # intersection. The separate entries pick up both variants with
+  # storage-level dedup handling the small overlap.
   - "victoriametrics"
+  - '"victoria metrics"'
 
 tags: ["story", "comment"]
 max_results_per_query: 50
