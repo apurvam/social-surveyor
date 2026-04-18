@@ -304,6 +304,54 @@ def test_triage_digit_expands_item_full_body(tmp_path: Path) -> None:
     assert "Third." in echoed
 
 
+def test_triage_expand_does_not_re_render_group(tmp_path: Path) -> None:
+    """Regression: an earlier loop structure re-rendered the group after
+    every `continue`, which meant expand flooded the screen with a fresh
+    group listing on top of the expanded item."""
+    db_path = _seed(tmp_path, {"hackernews:q1": 3})
+    # Expand items 1, 2, 3 in sequence, then keep.
+    script = _Script(["1", "2", "3", "k"])
+
+    run_triage(
+        "demo",
+        db_path,
+        tmp_path,
+        source_filter=None,
+        limit=5,
+        input_fn=script.input,
+        echo_fn=script.echo,
+    )
+
+    group_renders = [m for m in script.echoed if "hackernews:q1 ===" in m]
+    # Only the initial render. Three expands + one decision should not
+    # trigger additional group renders.
+    assert len(group_renders) == 1
+    expansions = [m for m in script.echoed if "-- expanded --" in m]
+    assert len(expansions) == 3
+
+
+def test_triage_collapse_rerenders_group_listing(tmp_path: Path) -> None:
+    """`c` re-emits the group listing so the operator can re-orient after
+    one or more item expansions have scrolled past."""
+    db_path = _seed(tmp_path, {"hackernews:q1": 3})
+    # Expand item 1, then collapse, then keep.
+    script = _Script(["1", "c", "k"])
+
+    run_triage(
+        "demo",
+        db_path,
+        tmp_path,
+        source_filter=None,
+        limit=5,
+        input_fn=script.input,
+        echo_fn=script.echo,
+    )
+
+    group_renders = [m for m in script.echoed if "hackernews:q1 ===" in m]
+    # Initial render + re-render after `c` = 2.
+    assert len(group_renders) == 2
+
+
 def test_triage_digit_out_of_range_is_handled(tmp_path: Path) -> None:
     db_path = _seed(tmp_path, {"hackernews:q1": 2})
     # Item 99 doesn't exist; should re-prompt, then keep.

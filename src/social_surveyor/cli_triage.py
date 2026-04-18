@@ -28,7 +28,7 @@ SKIP = "skip"
 
 _PROMPT = (
     "[k]eep / [d]rop / [r]efine / [s]kip / [v]iew more / "
-    "<N> expand item / [q]uit: "
+    "<N> expand item / [c]ollapse (re-list) / [q]uit: "
 )
 
 _KEY_TO_DECISION = {"k": KEEP, "d": DROP, "r": REFINE, "s": SKIP}
@@ -165,32 +165,61 @@ def run_triage(
         total_groups = len(relevant_groups)
         for idx, (group_key, total) in enumerate(relevant_groups, start=1):
             offset = 0
+            # `advance_page` gates the initial render per page: True on
+            # page entry, flipped to False after render. Operations that
+            # keep the operator on the same page (expand, collapse,
+            # unknown-choice reprompt) leave it False — preventing the
+            # accidental double-render that otherwise fires on every
+            # `continue` back to the top of the while.
+            advance_page = True
             while True:
-                sample = db.list_items_in_group(group_key, limit=limit, offset=offset)
-                if not sample and offset == 0:
-                    # Edge case: count nonzero but items vanished. Skip.
-                    break
-                if not sample:
-                    echo_fn("  (no more items in this group)")
-                    break
-
-                echo_fn(
-                    _render_group(
-                        group_key,
-                        sample,
-                        total,
-                        window_days,
-                        index=idx,
-                        total_groups=total_groups,
-                        preview_chars=preview_chars,
+                if advance_page:
+                    sample = db.list_items_in_group(
+                        group_key, limit=limit, offset=offset
                     )
-                )
+                    if not sample and offset == 0:
+                        # Edge case: count nonzero but items vanished.
+                        break
+                    if not sample:
+                        echo_fn("  (no more items in this group)")
+                        break
+                    echo_fn(
+                        _render_group(
+                            group_key,
+                            sample,
+                            total,
+                            window_days,
+                            index=idx,
+                            total_groups=total_groups,
+                            preview_chars=preview_chars,
+                        )
+                    )
+                    advance_page = False
+
                 raw = input_fn(_PROMPT).strip().lower()
                 if raw == "q":
                     decisions.append(Decision(group_key=group_key, decision=SKIP, item_count=total))
                     return _write_report(project, projects_root, now, decisions, aborted=True)
                 if raw == "v":
                     offset += limit
+                    advance_page = True
+                    continue
+                # "Collapse" — re-render the current group listing so the
+                # operator has a fresh view at the bottom of the terminal
+                # after one or more item expansions pushed it out of sight.
+                # We can't un-print scrollback; this is the nearest thing.
+                if raw == "c":
+                    echo_fn(
+                        _render_group(
+                            group_key,
+                            sample,
+                            total,
+                            window_days,
+                            index=idx,
+                            total_groups=total_groups,
+                            preview_chars=preview_chars,
+                        )
+                    )
                     continue
                 # Digit → expand the Nth item in the current page to full body.
                 if raw.isdigit():
@@ -206,7 +235,7 @@ def run_triage(
                 if decision is None:
                     echo_fn(
                         f"  unknown choice {raw!r}; expected one of: "
-                        f"k d r s v q or a digit 1-{len(sample)}"
+                        f"k d r s v c q or a digit 1-{len(sample)}"
                     )
                     continue
 
