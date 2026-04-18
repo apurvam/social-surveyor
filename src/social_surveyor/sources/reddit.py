@@ -239,7 +239,15 @@ class RedditSource(Source):
     )
     def _get_with_retry(self, url: str) -> bytes:
         self._throttle()
-        resp = self._client.get(url, headers={"User-Agent": self._user_agent})
+        # Connection: close forces a new TCP connection per request.
+        # Reddit's anti-bot returns 403 on the 2nd+ request sent over a
+        # reused keep-alive connection to search.rss, even under the
+        # rate-limit bucket. curl (separate processes = separate conns)
+        # never hits this; httpx.Client keep-alive does, deterministically.
+        resp = self._client.get(
+            url,
+            headers={"User-Agent": self._user_agent, "Connection": "close"},
+        )
         self._last_request_monotonic = time.monotonic()
         if resp.status_code == 403:
             raise RedditForbiddenError(
