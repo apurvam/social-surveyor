@@ -33,15 +33,32 @@ class RedditSourceConfig(SourceConfig):
     queries: list[str] = Field(
         ..., min_length=1, description="Search queries applied to each subreddit."
     )
+    reddit_username: str = Field(
+        ...,
+        min_length=1,
+        description=(
+            "Reddit handle of the person running social-surveyor. Used only to "
+            "construct a polite User-Agent header (not for auth). Required — RSS "
+            "polls with generic user agents get rate-limited aggressively."
+        ),
+    )
+    min_seconds_between_requests: float = Field(
+        default=2.0,
+        ge=0.0,
+        description=(
+            "Client-side throttle between RSS requests. Reddit's unauthenticated "
+            "limits are aggressive; 2s default keeps us well clear."
+        ),
+    )
     limit_per_query: int = Field(
         default=100,
         ge=1,
-        le=1000,
-        description="Max results per (subreddit, query) pair on a single poll.",
+        le=100,
+        description="Max results per (subreddit, query) pair; passed to RSS as ?limit=.",
     )
     time_filter: Literal["hour", "day", "week", "month", "year", "all"] = Field(
         default="week",
-        description="Default Reddit search time filter for poll() and fallback for backfill().",
+        description="Reddit search time filter; passed to RSS as ?t=.",
     )
 
 

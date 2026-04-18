@@ -123,7 +123,9 @@ def test_poll_all_sources_continues_when_one_fails(
     root = tmp_path
     proj = root / "projects" / "demo" / "sources"
     proj.mkdir(parents=True)
-    (proj / "reddit.yaml").write_text("subreddits: [devops]\nqueries: [q]\n")
+    (proj / "reddit.yaml").write_text(
+        "subreddits: [devops]\nqueries: [q]\nreddit_username: tester\n"
+    )
     (proj / "hackernews.yaml").write_text("queries: [q]\n")
 
     # Replace the SOURCE_BUILDERS entries for reddit and hackernews with

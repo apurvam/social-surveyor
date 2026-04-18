@@ -18,6 +18,7 @@ def test_load_valid_reddit_config(tmp_path: Path) -> None:
         """
 subreddits: [devops, kubernetes]
 queries: ["prometheus storage"]
+reddit_username: example_user
 limit_per_query: 50
 time_filter: month
 """,
@@ -29,6 +30,7 @@ time_filter: month
     assert cfg.reddit is not None
     assert cfg.reddit.subreddits == ["devops", "kubernetes"]
     assert cfg.reddit.queries == ["prometheus storage"]
+    assert cfg.reddit.reddit_username == "example_user"
     assert cfg.reddit.limit_per_query == 50
     assert cfg.reddit.time_filter == "month"
 

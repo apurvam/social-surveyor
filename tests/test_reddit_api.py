@@ -11,6 +11,14 @@ from social_surveyor.sources.base import SourceInitError
 from social_surveyor.sources.reddit_api import RedditSource, _days_to_time_filter
 
 
+def _cfg(**kwargs) -> RedditSourceConfig:
+    """PRAW's RedditSource doesn't read ``reddit_username``; supply a
+    placeholder so config validation passes (the field is required at
+    the config level for the active RSS source)."""
+    kwargs.setdefault("reddit_username", "dormant-praw-tests")
+    return RedditSourceConfig(**kwargs)
+
+
 def _submission(
     id_: str = "abc123",
     title: str = "Prometheus storage question",
@@ -67,7 +75,7 @@ def _client_returning(subs_by_query: dict[tuple[str, str], list[SimpleNamespace]
 
 
 def test_fetch_maps_submissions_to_raw_items() -> None:
-    cfg = RedditSourceConfig(subreddits=["devops"], queries=["prometheus storage"])
+    cfg = _cfg(subreddits=["devops"], queries=["prometheus storage"])
     sub = _submission()
     client = _client_returning({("devops", "prometheus storage"): [sub]})
 
@@ -89,7 +97,7 @@ def test_fetch_maps_submissions_to_raw_items() -> None:
 
 
 def test_fetch_iterates_all_subreddit_query_pairs() -> None:
-    cfg = RedditSourceConfig(
+    cfg = _cfg(
         subreddits=["devops", "kubernetes"],
         queries=["prometheus", "thanos"],
     )
@@ -110,7 +118,7 @@ def test_fetch_iterates_all_subreddit_query_pairs() -> None:
 
 
 def test_fetch_link_post_has_no_body() -> None:
-    cfg = RedditSourceConfig(subreddits=["devops"], queries=["q"])
+    cfg = _cfg(subreddits=["devops"], queries=["q"])
     link_post = _submission(is_self=False, selftext="")
     client = _client_returning({("devops", "q"): [link_post]})
 
@@ -121,7 +129,7 @@ def test_fetch_link_post_has_no_body() -> None:
 
 
 def test_fetch_handles_deleted_author() -> None:
-    cfg = RedditSourceConfig(subreddits=["devops"], queries=["q"])
+    cfg = _cfg(subreddits=["devops"], queries=["q"])
     sub = _submission(author=None)
     client = _client_returning({("devops", "q"): [sub]})
 
@@ -133,7 +141,7 @@ def test_fetch_handles_deleted_author() -> None:
 
 
 def test_backfill_filters_items_older_than_cutoff() -> None:
-    cfg = RedditSourceConfig(subreddits=["devops"], queries=["q"])
+    cfg = _cfg(subreddits=["devops"], queries=["q"])
     now = datetime.now(UTC)
     recent = _submission("recent", created_utc=(now - timedelta(days=3)).timestamp())
     old = _submission("old", created_utc=(now - timedelta(days=20)).timestamp())
@@ -146,7 +154,7 @@ def test_backfill_filters_items_older_than_cutoff() -> None:
 
 
 def test_backfill_uses_search_time_filter(monkeypatch: pytest.MonkeyPatch) -> None:
-    cfg = RedditSourceConfig(subreddits=["devops"], queries=["q"])
+    cfg = _cfg(subreddits=["devops"], queries=["q"])
     seen: dict[str, object] = {}
 
     def fake_search(self, subreddit, query, *, sort, time_filter, limit):
@@ -177,7 +185,7 @@ def test_init_raises_source_init_error_when_env_missing(
 ) -> None:
     for var in ("REDDIT_CLIENT_ID", "REDDIT_CLIENT_SECRET", "REDDIT_USER_AGENT"):
         monkeypatch.delenv(var, raising=False)
-    cfg = RedditSourceConfig(subreddits=["devops"], queries=["q"])
+    cfg = _cfg(subreddits=["devops"], queries=["q"])
     with pytest.raises(SourceInitError) as exc:
         RedditSource(cfg)
     assert "REDDIT_CLIENT_ID" in str(exc.value)

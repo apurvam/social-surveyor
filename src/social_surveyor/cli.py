@@ -18,6 +18,7 @@ from .log_config import configure_logging
 from .sources.base import Source, SourceInitError
 from .sources.github import GitHubSource
 from .sources.hackernews import HackerNewsSource
+from .sources.reddit import RedditSource
 from .sources.x import XSource
 from .storage import Storage
 from .types import RawItem
@@ -38,9 +39,7 @@ log = structlog.get_logger(__name__)
 # but passing it uniformly keeps the CLI simple.
 SourceBuilder = Callable[[ProjectConfig, Storage], Source]
 SOURCE_BUILDERS: dict[str, SourceBuilder] = {
-    # "reddit" is temporarily absent between session 2.5 commits A1 and
-    # A3: PRAW source has been preserved as reddit_api.py (dormant); the
-    # RSS-based replacement lands in A3.
+    "reddit": lambda cfg, _: RedditSource(cfg.reddit),  # type: ignore[arg-type]
     "hackernews": lambda cfg, db: HackerNewsSource(cfg.hackernews, db),  # type: ignore[arg-type]
     "github": lambda cfg, db: GitHubSource(cfg.github, db),  # type: ignore[arg-type]
     "x": lambda cfg, db: XSource(cfg.x, db),  # type: ignore[arg-type]
@@ -84,8 +83,8 @@ def _load_or_exit(project: str) -> ProjectConfig:
 
 def _configured_source_names(cfg: ProjectConfig) -> list[str]:
     names = []
-    # "reddit" is not listed here between A1 and A3; it is re-added when
-    # the RSS-based RedditSource is registered in SOURCE_BUILDERS.
+    if cfg.reddit is not None:
+        names.append("reddit")
     if cfg.hackernews is not None:
         names.append("hackernews")
     if cfg.github is not None:
