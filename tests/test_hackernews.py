@@ -175,6 +175,46 @@ def test_strip_html_unescapes_entities_and_drops_tags() -> None:
     assert "see this." in cleaned
 
 
+def test_fetch_sends_typo_tolerance_and_advanced_syntax(tmp_path: Path) -> None:
+    """Regression: without typoTolerance=false, Algolia returned e.g.
+    `catalog`-containing comments for `query=datadog`. advancedSyntax=true
+    enables literal-phrase matching via double-quotes in the value.
+    Both must appear on every outgoing Algolia request."""
+    sent_params: list[dict[str, Any]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        sent_params.append(dict(request.url.params))
+        return httpx.Response(200, json={"hits": []})
+
+    client = httpx.Client(transport=httpx.MockTransport(handler))
+    cfg = HackerNewsSourceConfig(queries=["datadog"])
+    with Storage(tmp_path / "t.db") as db:
+        HackerNewsSource(cfg, db, client=client).fetch()
+
+    assert sent_params, "no requests were made"
+    for p in sent_params:
+        assert p.get("typoTolerance") == "false", p
+        assert p.get("advancedSyntax") == "true", p
+
+
+def test_backfill_sends_typo_tolerance_and_advanced_syntax(tmp_path: Path) -> None:
+    sent_params: list[dict[str, Any]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        sent_params.append(dict(request.url.params))
+        return httpx.Response(200, json={"hits": []})
+
+    client = httpx.Client(transport=httpx.MockTransport(handler))
+    cfg = HackerNewsSourceConfig(queries=["q"])
+    with Storage(tmp_path / "t.db") as db:
+        HackerNewsSource(cfg, db, client=client).backfill(days=3)
+
+    assert sent_params
+    for p in sent_params:
+        assert p.get("typoTolerance") == "false", p
+        assert p.get("advancedSyntax") == "true", p
+
+
 def test_fetch_cleans_comment_body_html(tmp_path: Path) -> None:
     payload = {
         "hits": [

@@ -24,6 +24,25 @@ log = structlog.get_logger(__name__)
 SEARCH_URL = "https://hn.algolia.com/api/v1/search_by_date"
 HN_ITEM_URL_TEMPLATE = "https://news.ycombinator.com/item?id={id_}"
 
+# Precision-critical Algolia parameters. Both were found the hard way.
+#
+# typoTolerance=false: without this, `datadog` matches `catalog` /
+#   `catalogues` (and similar) via Algolia's default single-character
+#   typo tolerance, which for a 7-char token is generous enough to
+#   return hundreds of false positives. Live check: a top-5 sample for
+#   `query=datadog` returned 0/5 items actually containing "datadog"
+#   until this was turned off.
+#
+# advancedSyntax=true: lets us send queries like '"observability bill"'
+#   with literal quote marks and have Algolia treat them as phrase
+#   matches. Without this, the quotes might be ignored and the two
+#   words searched as independent AND-tokens.
+_DEFAULT_ALGOLIA_PARAMS: dict[str, Any] = {
+    "typoTolerance": "false",
+    "advancedSyntax": "true",
+}
+
+
 # Algolia returns comment and story text with HTML markup intact:
 # entities like &#x27; + inline tags like <p>, <a>. Both need cleaning
 # so the classifier sees plain text.
@@ -61,6 +80,7 @@ class HackerNewsSource(Source):
         for query in self.cfg.queries:
             cursor = self.storage.get_cursor(self.name, query)
             params: dict[str, Any] = {
+                **_DEFAULT_ALGOLIA_PARAMS,
                 "query": query,
                 "hitsPerPage": self.cfg.max_results_per_query,
                 "tags": tags_filter,
@@ -96,6 +116,7 @@ class HackerNewsSource(Source):
         fetched_count = 0
         for query in self.cfg.queries:
             params: dict[str, Any] = {
+                **_DEFAULT_ALGOLIA_PARAMS,
                 "query": query,
                 "hitsPerPage": self.cfg.max_results_per_query,
                 "tags": tags_filter,
