@@ -15,6 +15,7 @@ from dotenv import load_dotenv
 from . import __version__
 from .cli_label import run_label
 from .cli_stats import run_stats
+from .cli_triage import run_triage
 from .config import ConfigError, ProjectConfig, load_project_config
 from .log_config import configure_logging
 from .sources.base import Source, SourceInitError
@@ -363,6 +364,44 @@ def label(
         f"\ndone — labeled={result['labeled']} skipped={result['skipped']} "
         f"remaining={result['remaining']}"
     )
+
+
+@app.command()
+def triage(
+    project: Annotated[str, typer.Option("--project", help="Project name.")],
+    source: Annotated[
+        str | None,
+        typer.Option("--source", help="Limit triage to one source."),
+    ] = None,
+    limit: Annotated[
+        int,
+        typer.Option("--limit", min=1, help="Sample size per group."),
+    ] = 8,
+    window_days: Annotated[
+        int,
+        typer.Option("--window-days", min=1, help="How far back to pull samples."),
+    ] = 30,
+) -> None:
+    """Walk query groups newest-first and record keep/drop/refine decisions.
+
+    Writes a Markdown report to projects/<project>/triage_YYYYMMDD_HHMM.md
+    with YAML-diff suggestions. The tool does NOT auto-edit source
+    configs — you review the report and apply changes manually.
+    """
+    _load_or_exit(project)
+    try:
+        report_path = run_triage(
+            project,
+            _db_path(project),
+            Path("projects"),
+            source_filter=source,
+            limit=limit,
+            window_days=window_days,
+        )
+    except typer.BadParameter as e:
+        typer.echo(str(e), err=True)
+        raise typer.Exit(code=1) from None
+    typer.echo(f"\nwrote triage report: {report_path}")
 
 
 @app.command()
