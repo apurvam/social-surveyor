@@ -13,22 +13,21 @@
 # would be too loose.
 
 queries:
-  # Observability pain: broad product-name matches (rely on the
-  # classifier to filter noise) plus one phrase-quoted specific.
-  - "datadog"
-  - "new relic"
+  # Observability pain. The broad `datadog` / `new relic` product-name
+  # queries were tried and DROPped in Session 2.75 triage: too many
+  # matches in the 30-day window had the product mentioned only in
+  # truncated-preview-invisible regions (past position 300 in long
+  # comments), making triage unreadable. Re-add once the classifier
+  # can read full bodies server-side.
   - '"observability bill"'
   - "grafana cloud expensive"
 
   # Prometheus storage (Session 2.75 triage DROPped "prometheus storage"
   # and "self host prometheus" as noise; kept the narrower ones).
-  - "prometheus long term"
   - "prometheus retention"
 
-  # Competitor mentions. "thanos" alone collides with Marvel discourse
-  # even on HN; pairing with prometheus disambiguates. Same pattern is
-  # why "cortex prometheus" and "mimir prometheus" are phrased this way.
-  - "thanos prometheus"
+  # Competitor mentions. "thanos prometheus" DROPped in follow-up
+  # triage — low volume and the disambiguation was still over-matching.
   - "mimir prometheus"
   - "cortex prometheus"
   - "victoriametrics"

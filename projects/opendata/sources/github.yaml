@@ -14,8 +14,10 @@ queries:
   # in:comments scope follow-up fetches the actual matching comments.
   - q: "victoriametrics org:prometheus"
     type: issues
-  - q: "victoriametrics org:grafana"
-    type: issues
+  # grafana dropped in Session 2.75 follow-up triage: Grafana is
+  # *designed* to work with VictoriaMetrics as a datasource, so mentions
+  # inside grafana/* issues are configuration questions ("how do I wire
+  # up VM as a Grafana datasource?"), not competitive-intel signals.
   - q: "victoriametrics org:thanos-io"
     type: issues
   - q: "victoriametrics org:cortexproject"
