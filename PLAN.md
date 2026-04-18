@@ -198,20 +198,53 @@ X spend during Phase B: **106 reads × $0.005 = $0.53**.
 
 **Non-goals:** New sources, classifier work, Slack integration. This session is cleanup and proof.
 
+### Session 2.75 — Triage, labeling, and setup tooling
+
+**Context:** Live verification (Session 2.5) gave us real items in the DB across four sources. Before the classifier can be built meaningfully, two manual activities need tooling:
+
+1. **Query triage.** Deciding which queries and subreddits are producing signal versus noise, and iterating on the source YAML configs based on what we see. Without tooling this is tedious: eyeball SQLite, switch to YAML, re-poll, eyeball again.
+2. **Labeling.** Producing ground-truth category + urgency labels for items, to serve as the eval set for the classifier in Session 3. Without tooling this is slow and error-prone (hand-edited JSONL leads to inconsistencies).
+
+This session also introduces a first-run setup wizard that captures required credentials and project inputs interactively, which lets a fresh forker go from `git clone` to "data flowing" in a few minutes.
+
+**Scope:**
+
+- `social-surveyor setup --project <n>`: interactive wizard that captures Reddit username, GitHub token, X bearer token, and any other per-source config values, writes them to `.env`, and validates each by making a cheap live call (GitHub `/rate_limit`, Reddit RSS fetch). X and Anthropic tokens are syntactic-checked only — live validation would cost money and "every setup run makes a call" is the wrong pattern to bake in. Masked defaults (first 4 + last 3 chars) with Enter-to-keep semantics.
+- `social-surveyor triage --project <n> [--source <n>] [--limit N]`: walks through recent items grouped by the query/config entry that produced them. For each group, shows a sample and prompts for a `keep / drop / refine / skip` decision. Decisions are written to a Markdown triage report with YAML-diff suggestions; the tool does not edit source configs automatically.
+- `social-surveyor label --project <n> [--source <n>] [--resume]`: walks through unlabeled items, shows each one, prompts for category + urgency + optional note, appends each label to `projects/<n>/evals/labeled.jsonl` immediately so Ctrl-C loses at most one label.
+- `social-surveyor stats --project <n>`: prints item counts by source, query, day, and label status. Explicitly surfaces the `(unknown query)` bucket for pre-`group_key` items.
+- `projects/<n>/categories.yaml`: minimal category + urgency-scale definition that the labeling tool reads. Session 3's `classifier.yaml` will extend this; categories defined here become the classifier's categories with no duplication.
+
+**Supporting work:**
+
+- All four sources populate `raw_json.group_key` on newly fetched items so `stats`/`triage` can group by configured query. Existing 1,533 items stay in `(unknown query)` — honest attribution beats guessed attribution, and the bucket drains naturally as new items come in.
+- Label file entries use the canonical `item_id` form `"{source}:{platform_id}"` (e.g., `"hackernews:41234567"`). Session 3's classifier joins on the same key.
+
+**Acceptance:**
+
+- Fresh clone + `uv sync` + `social-surveyor setup --project opendata` walks a new user through credential capture end-to-end without making any paid live calls.
+- `social-surveyor stats --project opendata` gives a one-screen summary of the DB, including an explicit `(unknown query)` line.
+- `social-surveyor triage --project opendata` shows query-grouped items, accepts k/d/r/s/v/q decisions, writes a YAML-diff suggestion to `projects/opendata/triage_YYYYMMDD_HHMM.md`.
+- `social-surveyor label --project opendata` walks items one at a time, writes labels incrementally (crash-safe), supports `--resume` (default), and allows a one-step `b`ack.
+- `projects/opendata/categories.yaml` exists with an initial category list + urgency scale.
+- `projects/opendata/evals/labeled.jsonl` has 100+ entries after the between-session labeling work (operator responsibility, not Claude Code's).
+
+**Non-goals:** The classifier itself (Session 3). The labeling tool is deliberately category-aware but classifier-agnostic — it doesn't call the LLM. No TUI framework (Rich/Textual); plain prompts are sufficient. No auto-editing of source YAML based on triage decisions — that's a footgun; the operator applies suggested edits manually.
+
 ### Session 3 — Classifier + eval harness
 
 **This session has a sub-plan.** The classifier prompt is the core product and deserves more ceremony than "write prompt, call API."
 
-**Scope:** Haiku integration, classifier module, initial prompt v1, eval harness, 50 hand-labeled items.
+**Scope:** Haiku integration, classifier module, initial prompt v1, eval harness. Labels and categories exist from Session 2.75.
 
 **Acceptance:**
 - `classifier.yaml` schema supports categories, urgency scale, ICP description, prompt version
+- `projects/<n>/classifier.yaml` extends the categories defined in `categories.yaml` rather than redefining them (single source of truth for the taxonomy)
 - `social-surveyor classify --project <n> --item-id <id>` classifies a single item and prints the result
 - `social-surveyor classify --project <n>` classifies all unclassified items in the DB
 - Every classification is persisted with `prompt_version`
 - Haiku API calls log input/output token counts for cost tracking
 - Failed classifications retry once with backoff, then flag the item for manual review
-- `projects/opendata/evals/labeled.jsonl` contains 50+ hand-labeled items (user fills this in between sessions 2.5 and 3)
 - `social-surveyor eval --project <n>` runs the current classifier against all labeled items and prints per-category precision/recall + urgency MAE + a diff report showing every disagreement
 - Eval completes in <30 seconds (important for fast iteration)
 - The user can change `classifier.yaml`, re-run eval, and see the delta
@@ -219,12 +252,11 @@ X spend during Phase B: **106 reads × $0.005 = $0.53**.
 **Sub-plan for the prompt itself:**
 
 1. First pass: write a v1 prompt from the ICP description and category list in classifier.yaml. Don't over-engineer.
-2. Hand-label 50 items from the DB (mix of obvious and ambiguous).
-3. Run eval. Expect ~70% accuracy.
-4. Read the diff report. Identify systematic failure modes (e.g., "classifying tutorial posts as complaints").
-5. Update the prompt with explicit negative examples for those failure modes. Bump to v2.
-6. Re-run eval. Target 85%+ precision on alert-worthy categories.
-7. Commit the prompt version that ships to prod. Keep v1 around for A/B.
+2. Run eval against the labels produced in Session 2.75. Expect ~70% accuracy.
+3. Read the diff report. Identify systematic failure modes (e.g., "classifying tutorial posts as complaints").
+4. Update the prompt with explicit negative examples for those failure modes. Bump to v2.
+5. Re-run eval. Target 85%+ precision on alert-worthy categories.
+6. Commit the prompt version that ships to prod. Keep v1 around for A/B.
 
 **Source-specific context the classifier must read** (item shapes as of session 2; Reddit's will firm up in 2.5):
 
@@ -334,6 +366,7 @@ X spend during Phase B: **106 reads × $0.005 = $0.53**.
 - **No Docker.** systemd + virtualenv + uv on the EC2 host. Simpler, smaller, faster.
 - **Live verification is required for "complete."** Every source module must be verified against real APIs within 7 days of being written, or it does not count as "complete" in session acceptance. The session that introduces the source owns verification; if blocked (credentials, API policy, etc.), the next session must include the verification step as a prerequisite.
 - **Mocked tests do not satisfy live-API acceptance criteria.** Acceptance criteria involving live API calls are satisfied only when verified by the user with real credentials, not by mocked tests. Session PR descriptions must explicitly flag which criteria were verified live vs mock-only.
+- **Labels and classifier prompts are separately authored.** The labeling process (Session 2.75) produces ground-truth labels against an agreed category taxonomy. The classifier prompt (Session 3) is written to match the same taxonomy. When they disagree, treat it as a potential prompt bug or a potential label inconsistency, not automatically either one.
 
 ---
 
@@ -355,6 +388,7 @@ Updated as sessions reveal new decisions. Current open items:
 - **Multi-project conflicts:** if two projects poll the same subreddit, we fetch and store twice. Acceptable for now (different projects have different classifiers, different storage). Revisit if it becomes a cost issue.
 - **Refresh policy for mutable item metadata.** `upsert_item` is insert-if-new; we never refresh comment counts, scores, issue state, etc. Fine for classification (post content is immutable) but would be nice for digest annotations ("this post now has 230 upvotes, up from 40 when we first saw it"). Revisit in Session 4 or later.
 - **Silent per-source failures.** Our multi-source poll catches exceptions and logs `poll.source.failed`, which covers crashing sources. It does *not* catch silent failures (a source that starts returning `[]` because an upstream API schema changed, or a hang where no timeout fires). Session 5's `/health` endpoint will track "last successful poll per source per project" so staleness alerts catch these; until then, eyeball the per-source row counts periodically.
+- **Category taxonomy stability.** Categories defined in Session 2.75's `categories.yaml` will be used by both the labeler and (in Session 3) the classifier. Renaming or restructuring categories after labeling has started invalidates prior labels. Treat the taxonomy as a decision to be made deliberately early and then held stable; if it must change, there should be a migration step in the change.
 
 ---
 
