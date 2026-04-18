@@ -43,11 +43,13 @@ class RedditSourceConfig(SourceConfig):
         ),
     )
     min_seconds_between_requests: float = Field(
-        default=2.0,
+        default=6.0,
         ge=0.0,
         description=(
-            "Client-side throttle between RSS requests. Reddit's unauthenticated "
-            "limits are aggressive; 2s default keeps us well clear."
+            "Client-side throttle between RSS requests. Live observation shows "
+            "Reddit's unauthenticated bucket is ~100 requests per ~10 minutes, "
+            "so 6s sustains indefinitely without 429s. The source also honors "
+            "x-ratelimit-reset on any 429 that does slip through."
         ),
     )
     limit_per_query: int = Field(

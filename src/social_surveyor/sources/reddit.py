@@ -45,6 +45,27 @@ log = structlog.get_logger(__name__)
 SEARCH_URL_TEMPLATE = "https://www.reddit.com/r/{subreddit}/search.rss"
 NEW_URL_TEMPLATE = "https://www.reddit.com/r/{subreddit}/new.rss"
 
+# Hard ceiling on how long we'll sleep for a rate-limit reset. A
+# reasonable reddit reset is ~5-10 minutes; anything longer suggests
+# something unusual (e.g., account-level throttling) — better to fail
+# than to hang a whole poll cycle.
+_MAX_RATELIMIT_SLEEP = 900.0
+
+
+def _parse_rate_limit_reset(headers) -> float | None:  # type: ignore[no-untyped-def]
+    """Parse reddit's x-ratelimit-reset header into seconds.
+
+    Reddit returns fractional seconds as a string (e.g. ``"314"``).
+    Returns None if the header is missing or unparseable.
+    """
+    raw = headers.get("x-ratelimit-reset")
+    if raw is None:
+        return None
+    try:
+        return float(raw)
+    except (TypeError, ValueError):
+        return None
+
 
 class RedditForbiddenError(httpx.HTTPError):
     """Reddit returned 403. Usually a User-Agent problem; do not retry.
@@ -223,8 +244,32 @@ class RedditSource(Source):
                 f"Reddit returned 403 for {url} — likely a User-Agent issue; "
                 f"check reddit_username in the config."
             )
-        if resp.status_code == 429 or 500 <= resp.status_code < 600:
-            resp.raise_for_status()
+        if resp.status_code == 429:
+            # Reddit returns x-ratelimit-reset as seconds until the
+            # bucket refills. Sleep that long (plus a small buffer)
+            # before letting tenacity retry; otherwise exponential
+            # backoff's 30s ceiling is too short to recover from a
+            # ~5-minute reset.
+            sleep_seconds = _parse_rate_limit_reset(resp.headers)
+            if sleep_seconds is not None and sleep_seconds <= _MAX_RATELIMIT_SLEEP:
+                log.warning(
+                    "reddit.rate_limited.backing_off",
+                    url=url,
+                    sleep_seconds=sleep_seconds,
+                    ratelimit_used=resp.headers.get("x-ratelimit-used"),
+                    ratelimit_remaining=resp.headers.get("x-ratelimit-remaining"),
+                )
+                time.sleep(sleep_seconds + 1.0)
+            else:
+                log.warning(
+                    "reddit.rate_limited.unknown_reset",
+                    url=url,
+                    headers={
+                        k: v
+                        for k, v in resp.headers.items()
+                        if k.lower().startswith("x-ratelimit")
+                    },
+                )
         resp.raise_for_status()
         return resp.content
 

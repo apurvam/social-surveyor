@@ -159,6 +159,7 @@ def test_429_retries_then_fails(monkeypatch: pytest.MonkeyPatch) -> None:
     from social_surveyor.sources import reddit as reddit_mod
 
     monkeypatch.setattr(reddit_mod.RedditSource._get_with_retry.retry, "wait", lambda *a, **k: 0)
+    monkeypatch.setattr(reddit_mod.time, "sleep", lambda s: None)
     cfg = _cfg()
     source = RedditSource(cfg, client=client)
 
@@ -166,6 +167,62 @@ def test_429_retries_then_fails(monkeypatch: pytest.MonkeyPatch) -> None:
         source.fetch()
 
     assert len(calls) == 3  # stop_after_attempt(3)
+
+
+def test_429_sleeps_for_x_ratelimit_reset(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Real-world regression: on 429, sleep x-ratelimit-reset seconds
+    before letting tenacity retry. Otherwise tenacity's 30s ceiling
+    can't recover from Reddit's ~5-minute bucket reset."""
+    sleeps: list[float] = []
+    attempts = {"n": 0}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        attempts["n"] += 1
+        if attempts["n"] == 1:
+            return httpx.Response(
+                429,
+                headers={
+                    "x-ratelimit-used": "100",
+                    "x-ratelimit-remaining": "0",
+                    "x-ratelimit-reset": "314",
+                },
+                content=b"",
+            )
+        return httpx.Response(200, content=FIXTURE_XML.encode("utf-8"))
+
+    client = httpx.Client(transport=httpx.MockTransport(handler))
+    from social_surveyor.sources import reddit as reddit_mod
+
+    monkeypatch.setattr(reddit_mod.time, "sleep", lambda s: sleeps.append(s))
+    monkeypatch.setattr(reddit_mod.RedditSource._get_with_retry.retry, "wait", lambda *a, **k: 0)
+
+    cfg = _cfg(subreddits=["devops"], queries=["q"])
+    items = RedditSource(cfg, client=client).fetch()
+
+    assert attempts["n"] == 2  # first 429, then success
+    # Our 429 handler should have slept ~315s (reset + 1s buffer).
+    assert any(s == pytest.approx(315.0) for s in sleeps)
+    assert len(items) == 3  # fixture entries
+
+
+def test_429_without_ratelimit_reset_still_raises(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(request)
+        return httpx.Response(429, content=b"")  # no x-ratelimit-reset
+
+    client = httpx.Client(transport=httpx.MockTransport(handler))
+    from social_surveyor.sources import reddit as reddit_mod
+
+    monkeypatch.setattr(reddit_mod.time, "sleep", lambda s: None)
+    monkeypatch.setattr(reddit_mod.RedditSource._get_with_retry.retry, "wait", lambda *a, **k: 0)
+
+    cfg = _cfg()
+    with pytest.raises(httpx.HTTPStatusError):
+        RedditSource(cfg, client=client).fetch()
+    # Still tries up to stop_after_attempt(3).
+    assert len(calls) == 3
 
 
 def test_malformed_feed_returns_empty_list_with_warning() -> None:
