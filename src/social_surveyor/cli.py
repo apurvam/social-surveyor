@@ -13,6 +13,7 @@ import typer
 from dotenv import load_dotenv
 
 from . import __version__
+from .cli_label import run_label
 from .cli_stats import run_stats
 from .config import ConfigError, ProjectConfig, load_project_config
 from .log_config import configure_logging
@@ -314,6 +315,54 @@ def usage(
         _print_json(report)
     finally:
         db.close()
+
+
+@app.command()
+def label(
+    project: Annotated[str, typer.Option("--project", help="Project name.")],
+    source: Annotated[
+        str | None,
+        typer.Option("--source", help="Limit labeling to one source."),
+    ] = None,
+    resume: Annotated[
+        bool,
+        typer.Option(
+            "--resume/--no-resume",
+            help="Skip items already in labeled.jsonl. On by default.",
+        ),
+    ] = True,
+    randomize: Annotated[
+        bool,
+        typer.Option("--random", help="Sample across the time range instead of newest-first."),
+    ] = False,
+) -> None:
+    """Walk through unlabeled items and record category + urgency + optional note.
+
+    Labels append to projects/<project>/evals/labeled.jsonl per decision
+    so Ctrl-C loses at most one label. `b` undoes the most recent label.
+    """
+    _load_or_exit(project)
+    if not resume:
+        # Legacy API kept so tests can exercise both paths; the queue
+        # builder still uses the labeled-ids set, so --no-resume is
+        # effectively identical to --resume today. Left as a knob for
+        # future "start fresh" semantics (e.g., relabel from scratch).
+        typer.echo("(--no-resume is currently equivalent to --resume; items in labeled.jsonl are always skipped)")
+    try:
+        result = run_label(
+            project,
+            _db_path(project),
+            Path("projects"),
+            source=source,
+            randomize=randomize,
+        )
+    except typer.BadParameter as e:
+        typer.echo(str(e), err=True)
+        raise typer.Exit(code=1) from None
+    typer.echo(
+        f"\ndone — labeled={result['labeled']} skipped={result['skipped']} "
+        f"remaining={result['remaining']}"
+    )
 
 
 @app.command()
