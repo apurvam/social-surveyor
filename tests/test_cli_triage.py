@@ -137,7 +137,9 @@ def test_triage_view_more_advances_offset(tmp_path: Path) -> None:
     )
 
     # Should have echoed two group renders (initial + view-more page).
-    renders = [msg for msg in script.echoed if "=== hackernews:q1 ===" in msg]
+    # Header now includes a [N/M] progress prefix, so match on the
+    # group_key portion rather than the literal "=== hackernews:q1 ===".
+    renders = [msg for msg in script.echoed if "hackernews:q1 ===" in msg]
     assert len(renders) == 2
     # And the decision should be KEEP.
     assert "KEEP" in report.read_text()
@@ -184,6 +186,51 @@ def test_triage_source_filter_restricts_groups(tmp_path: Path) -> None:
     text = report.read_text()
     assert "hackernews:q" in text
     assert "reddit:" not in text
+
+
+def test_suggested_yaml_changes_skips_unknown_bucket() -> None:
+    """DROP on the `(unknown query)` bucket must not produce a bogus
+    YAML file path like `sources/(unknown query).yaml`.
+    """
+    decisions = [
+        Decision(group_key="(unknown query)", decision="drop", item_count=788),
+    ]
+    lines = _suggested_yaml_changes(decisions)
+    # Only the (unknown query) bucket was dropped; since it has no
+    # source YAML, the function should skip rendering a suggestion
+    # section at all.
+    assert lines == []
+
+
+def test_suggested_yaml_changes_mixes_real_and_unknown_correctly() -> None:
+    """Real DROPs still render; unknown bucket is filtered out."""
+    decisions = [
+        Decision(group_key="(unknown query)", decision="drop", item_count=788),
+        Decision(group_key="hackernews:datadog cost", decision="drop", item_count=20),
+    ]
+    text = "\n".join(_suggested_yaml_changes(decisions))
+    assert "hackernews.yaml" in text
+    assert "(unknown query).yaml" not in text
+    assert "sources/(" not in text
+
+
+def test_session_complete_message_fires_when_all_groups_decided(tmp_path: Path) -> None:
+    db_path = _seed(tmp_path, {"hackernews:q1": 3, "hackernews:q2": 3})
+    script = _Script(["k", "k"])  # keep both, let loop finish naturally
+
+    run_triage(
+        "demo",
+        db_path,
+        tmp_path,
+        source_filter=None,
+        limit=5,
+        input_fn=script.input,
+        echo_fn=script.echo,
+    )
+
+    echoed = "\n".join(script.echoed)
+    assert "session complete" in echoed
+    assert "2 decision(s)" in echoed
 
 
 def test_suggested_yaml_changes_reddit_drop_summary() -> None:

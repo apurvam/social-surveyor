@@ -39,6 +39,11 @@ class Decision:
     sample_titles: list[str] = field(default_factory=list)
 
 
+def _is_unknown_bucket(group_key: str) -> bool:
+    """The ``(unknown query)`` bucket maps back to no real source config."""
+    return group_key == Storage._UNKNOWN_GROUP
+
+
 def _parse_group_key(group_key: str) -> tuple[str, str | None, str]:
     """Split ``source:{suffix}`` into (source, subreddit?, query).
 
@@ -60,11 +65,14 @@ def _render_group(
     items: list[dict[str, Any]],
     total: int,
     days: int,
+    *,
+    index: int,
+    total_groups: int,
 ) -> str:
     per_day = total / max(1, days)
     lines: list[str] = [
         "",
-        f"=== {group_key} ===",
+        f"=== [{index}/{total_groups}] {group_key} ===",
         f"    total in window: {total}  ({per_day:.1f}/day over {days}d)",
         "",
     ]
@@ -119,7 +127,8 @@ def run_triage(
         )
 
         decisions: list[Decision] = []
-        for group_key, total in relevant_groups:
+        total_groups = len(relevant_groups)
+        for idx, (group_key, total) in enumerate(relevant_groups, start=1):
             offset = 0
             while True:
                 sample = db.list_items_in_group(group_key, limit=limit, offset=offset)
@@ -130,7 +139,16 @@ def run_triage(
                     echo_fn("  (no more items in this group)")
                     break
 
-                echo_fn(_render_group(group_key, sample, total, window_days))
+                echo_fn(
+                    _render_group(
+                        group_key,
+                        sample,
+                        total,
+                        window_days,
+                        index=idx,
+                        total_groups=total_groups,
+                    )
+                )
                 raw = input_fn(_PROMPT).strip().lower()
                 if raw == "q":
                     decisions.append(Decision(group_key=group_key, decision=SKIP, item_count=total))
@@ -154,6 +172,13 @@ def run_triage(
                     )
                 )
                 break
+
+        # All groups reviewed without quit — surface the natural end
+        # so the operator isn't surprised by a silent exit.
+        echo_fn(
+            f"\nsession complete — {len(decisions)} decision(s) across "
+            f"{total_groups} group(s). writing report..."
+        )
 
     return _write_report(project, projects_root, now, decisions, aborted=False)
 
@@ -214,11 +239,20 @@ def _write_report(
 
 
 def _suggested_yaml_changes(decisions: list[Decision]) -> list[str]:
-    """Emit per-source YAML-diff suggestions based on DROP decisions."""
+    """Emit per-source YAML-diff suggestions based on DROP decisions.
+
+    The ``(unknown query)`` bucket is deliberately excluded here — it
+    aggregates pre-``group_key`` items across every source, so there
+    is no single YAML file the operator could edit in response.
+    Decisions on that bucket still appear in the Decisions summary
+    above; they just don't produce a config-edit recommendation.
+    """
     drops_by_source: dict[str, list[Decision]] = {}
     refines_by_source: dict[str, list[Decision]] = {}
     for d in decisions:
         if d.decision not in {DROP, REFINE}:
+            continue
+        if _is_unknown_bucket(d.group_key):
             continue
         source, _, _ = d.group_key.partition(":")
         bucket = drops_by_source if d.decision == DROP else refines_by_source
@@ -278,7 +312,9 @@ def _suggested_yaml_changes(decisions: list[Decision]) -> list[str]:
 
 
 def _refine_samples(decisions: list[Decision]) -> list[str]:
-    refines = [d for d in decisions if d.decision == REFINE]
+    refines = [
+        d for d in decisions if d.decision == REFINE and not _is_unknown_bucket(d.group_key)
+    ]
     if not refines:
         return []
     out: list[str] = ["## REFINE — sample titles for context", ""]
