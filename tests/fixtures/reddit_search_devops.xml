@@ -1,0 +1,49 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<feed xmlns="http://www.w3.org/2005/Atom">
+  <category term="devops" label="r/devops" />
+  <updated>2026-04-15T12:00:00+00:00</updated>
+  <icon>https://www.redditstatic.com/icon.png/</icon>
+  <id>/r/devops/search.rss?q=prometheus+storage&amp;restrict_sr=on&amp;sort=new</id>
+  <link rel="self" href="https://www.reddit.com/r/devops/search.rss?q=prometheus+storage&amp;restrict_sr=on&amp;sort=new" type="application/atom+xml" />
+  <link rel="alternate" href="https://www.reddit.com/r/devops/search?q=prometheus+storage&amp;restrict_sr=on&amp;sort=new" type="text/html" />
+  <title>search results: prometheus storage (devops)</title>
+  <entry>
+    <author>
+      <name>/u/alice</name>
+      <uri>https://www.reddit.com/user/alice</uri>
+    </author>
+    <category term="devops" label="r/devops" />
+    <content type="html">&lt;!-- SC_OFF --&gt;&lt;div class="md"&gt;&lt;p&gt;We&amp;#39;ve been paying Datadog $18k/month for Prometheus metrics retention. Looking at &lt;a href="https://thanos.io"&gt;Thanos&lt;/a&gt; or Mimir to self-host long-term storage. Anyone gone through this?&lt;/p&gt;&lt;/div&gt;&lt;!-- SC_ON --&gt;</content>
+    <id>t3_abc123</id>
+    <link href="https://www.reddit.com/r/devops/comments/abc123/prometheus_storage_cost_comparison/" />
+    <updated>2026-04-15T10:00:00+00:00</updated>
+    <published>2026-04-15T10:00:00+00:00</published>
+    <title>Prometheus long-term storage — Thanos vs Mimir for cost</title>
+  </entry>
+  <entry>
+    <author>
+      <name>/u/bob_sre</name>
+      <uri>https://www.reddit.com/user/bob_sre</uri>
+    </author>
+    <category term="devops" label="r/devops" />
+    <content type="html">&lt;!-- SC_OFF --&gt;&lt;div class="md"&gt;&lt;p&gt;Link post discussion in comments.&lt;/p&gt;&lt;/div&gt;&lt;!-- SC_ON --&gt;</content>
+    <id>t3_def456</id>
+    <link href="https://www.reddit.com/r/devops/comments/def456/prometheus_retention_deep_dive/" />
+    <updated>2026-04-14T18:30:00+00:00</updated>
+    <published>2026-04-14T18:30:00+00:00</published>
+    <title>Prometheus retention: deep dive on TSDB compaction</title>
+  </entry>
+  <entry>
+    <author>
+      <name>/u/carol_dev</name>
+      <uri>https://www.reddit.com/user/carol_dev</uri>
+    </author>
+    <category term="devops" label="r/devops" />
+    <content type="html">&lt;!-- SC_OFF --&gt;&lt;div class="md"&gt;&lt;p&gt;Grafana Cloud is quoting us $9k/month just for metrics. Considering rolling our own with Prometheus + VictoriaMetrics.&lt;/p&gt;&lt;/div&gt;&lt;!-- SC_ON --&gt;</content>
+    <id>t3_ghi789</id>
+    <link href="https://www.reddit.com/r/devops/comments/ghi789/grafana_cloud_vs_self_host/" />
+    <updated>2026-04-14T09:15:00+00:00</updated>
+    <published>2026-04-14T09:15:00+00:00</published>
+    <title>Grafana Cloud is too expensive — self-hosted metrics stack?</title>
+  </entry>
+</feed>

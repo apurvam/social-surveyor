@@ -95,9 +95,7 @@ class RedditSource(Source):
         items: list[RawItem] = []
         for subreddit in self.cfg.subreddits:
             for query in self.cfg.queries:
-                feed_items = self._fetch_search(
-                    subreddit, query, time_filter=self.cfg.time_filter
-                )
+                feed_items = self._fetch_search(subreddit, query, time_filter=self.cfg.time_filter)
                 log.info(
                     "reddit.fetch",
                     subreddit=subreddit,
@@ -151,9 +149,7 @@ class RedditSource(Source):
                         source=self.name,
                         subreddit=subreddit,
                         days_requested=days,
-                        oldest_item_age_hours=(
-                            datetime.now(UTC) - oldest_in_sub
-                        ).total_seconds()
+                        oldest_item_age_hours=(datetime.now(UTC) - oldest_in_sub).total_seconds()
                         / 3600,
                     )
 
@@ -180,18 +176,28 @@ class RedditSource(Source):
         return self._fetch_url(url, subreddit=subreddit)
 
     def _fetch_new(self, subreddit: str) -> list[RawItem]:
-        url = NEW_URL_TEMPLATE.format(subreddit=subreddit) + "?" + urlencode(
-            {"limit": self.cfg.limit_per_query}
+        url = (
+            NEW_URL_TEMPLATE.format(subreddit=subreddit)
+            + "?"
+            + urlencode({"limit": self.cfg.limit_per_query})
         )
         return self._fetch_url(url, subreddit=subreddit)
 
     def _fetch_url(self, url: str, *, subreddit: str) -> list[RawItem]:
         body = self._get_with_retry(url)
+        if not _looks_like_feed(body):
+            # Reddit sometimes serves an HTML rate-limit or error page
+            # with a 200 status. feedparser is lenient and won't flag
+            # that as bozo, so we sniff the body ourselves.
+            log.warning(
+                "reddit.feed.unparseable",
+                url=url,
+                reason="response body is not XML/Atom",
+                body_prefix=body[:80].decode("utf-8", errors="replace"),
+            )
+            return []
         parsed = feedparser.parse(body)
         if parsed.bozo and parsed.entries == []:
-            # Feedparser sets .bozo when XML is malformed; an empty
-            # entries list on top of that usually means Reddit served
-            # an HTML rate-limit page or error instead of a feed.
             log.warning(
                 "reddit.feed.unparseable",
                 url=url,
@@ -232,6 +238,16 @@ class RedditSource(Source):
 
 
 # --------------------------------------------------------------- module-level
+
+
+def _looks_like_feed(body: bytes) -> bool:
+    """Sniff whether the response body is an XML/Atom feed.
+
+    feedparser is lenient enough that an HTML rate-limit page doesn't
+    trigger ``bozo``; we need to check ourselves.
+    """
+    head = body[:200].lstrip().lower()
+    return head.startswith((b"<?xml", b"<feed", b"<rss"))
 
 
 def _build_user_agent(reddit_username: str) -> str:
