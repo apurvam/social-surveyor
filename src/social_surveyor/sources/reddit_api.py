@@ -1,3 +1,13 @@
+"""Dormant PRAW-based Reddit source.
+
+Preserved for future reactivation if/when Reddit grants API access via
+the Responsible Builder Policy (filed during session 2.5). Not wired
+into the source registry in ``cli.py`` as of session 2.5; do not import
+from this module in application code.
+
+See ``reddit.py`` for the active RSS-based implementation.
+"""
+
 from __future__ import annotations
 
 import os

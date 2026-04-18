@@ -8,7 +8,7 @@ import pytest
 
 from social_surveyor.config import RedditSourceConfig
 from social_surveyor.sources.base import SourceInitError
-from social_surveyor.sources.reddit import RedditSource, _days_to_time_filter
+from social_surveyor.sources.reddit_api import RedditSource, _days_to_time_filter
 
 
 def _submission(
