@@ -3,9 +3,15 @@
 # pain, Prometheus long-term storage, competitor mentions.
 
 queries:
-  # Observability cost pain
+  # Observability cost pain. Datadog coverage is intentionally broad —
+  # the same bill complaint comes in many phrasings ("pricing" vs
+  # "invoice" vs "overage").
   - "datadog cost"
   - "datadog expensive"
+  - "datadog bill"
+  - "datadog pricing"
+  - "datadog invoice"
+  - "datadog overage"
   - "new relic bill"
   - "grafana cloud expensive"
   - "observability bill"

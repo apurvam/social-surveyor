@@ -30,9 +30,16 @@ subreddits:
   - monitoring
 
 queries:
-  # Observability cost pain
+  # Observability cost pain. Datadog coverage is intentionally broad —
+  # the same bill complaint comes in many phrasings ("pricing" vs
+  # "invoice" vs "overage"), and misses are more expensive than a few
+  # extra dedup hits.
   - "datadog cost"
   - "datadog expensive"
+  - "datadog bill"
+  - "datadog pricing"
+  - "datadog invoice"
+  - "datadog overage"
   - "new relic bill"
   - "grafana cloud expensive"
   - "observability bill"

@@ -5,7 +5,7 @@
 
 queries:
   - name: "observability_cost_complaints"
-    query: '("datadog bill" OR "new relic cost" OR "grafana cloud expensive") -is:retweet lang:en'
+    query: '("datadog bill" OR "datadog pricing" OR "datadog invoice" OR "datadog overage" OR "new relic cost" OR "grafana cloud expensive") -is:retweet lang:en'
 
   - name: "prometheus_storage_intent"
     query: '(prometheus ("self-host" OR "long-term storage" OR "durable")) -is:retweet lang:en'
