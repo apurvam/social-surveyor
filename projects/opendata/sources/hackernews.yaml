@@ -22,7 +22,7 @@ queries:
   - "datadog"
   - '"new relic"'
   - '"observability bill"'
-  - "grafana cloud expensive"
+  - '"grafana cloud"'
 
   # Prometheus storage (Session 2.75 triage DROPped "prometheus storage"
   # and "self host prometheus" as noise; kept the narrower ones).
