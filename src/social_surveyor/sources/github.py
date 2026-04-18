@@ -240,6 +240,7 @@ class GitHubSource(Source):
                 **issue,
                 "search_scope": "default",
                 "matched_query": gq.q,
+                "group_key": f"github:{gq.q}",
                 "is_pr": "pull_request" in issue,
             },
         )
@@ -263,6 +264,7 @@ class GitHubSource(Source):
                 **comment,
                 "search_scope": "in:comments",
                 "matched_query": gq.q,
+                "group_key": f"github:{gq.q}",
                 "parent_issue": {
                     "id": parent_issue.get("id"),
                     "number": parent_issue.get("number"),

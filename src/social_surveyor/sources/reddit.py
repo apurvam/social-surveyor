@@ -194,7 +194,9 @@ class RedditSource(Source):
             "limit": self.cfg.limit_per_query,
         }
         url = SEARCH_URL_TEMPLATE.format(subreddit=subreddit) + "?" + urlencode(params)
-        return self._fetch_url(url, subreddit=subreddit)
+        return self._fetch_url(
+            url, subreddit=subreddit, group_key=f"reddit:r/{subreddit}/{query}"
+        )
 
     def _fetch_new(self, subreddit: str) -> list[RawItem]:
         url = (
@@ -202,9 +204,11 @@ class RedditSource(Source):
             + "?"
             + urlencode({"limit": self.cfg.limit_per_query})
         )
-        return self._fetch_url(url, subreddit=subreddit)
+        return self._fetch_url(
+            url, subreddit=subreddit, group_key=f"reddit:r/{subreddit}/(new)"
+        )
 
-    def _fetch_url(self, url: str, *, subreddit: str) -> list[RawItem]:
+    def _fetch_url(self, url: str, *, subreddit: str, group_key: str) -> list[RawItem]:
         body = self._get_with_retry(url)
         if not _looks_like_feed(body):
             # Reddit sometimes serves an HTML rate-limit or error page
@@ -225,7 +229,10 @@ class RedditSource(Source):
                 reason=str(parsed.bozo_exception) if parsed.bozo_exception else "unknown",
             )
             return []
-        return [_entry_to_raw_item(e, subreddit=subreddit) for e in parsed.entries]
+        return [
+            _entry_to_raw_item(e, subreddit=subreddit, group_key=group_key)
+            for e in parsed.entries
+        ]
 
     @retry(
         # Explicitly exclude RedditForbiddenError — a 403 indicates a
@@ -372,7 +379,7 @@ def _entry_created_at(entry: Any) -> datetime:
     return datetime(*parsed[:6], tzinfo=UTC)
 
 
-def _entry_to_raw_item(entry: Any, *, subreddit: str) -> RawItem:
+def _entry_to_raw_item(entry: Any, *, subreddit: str, group_key: str) -> RawItem:
     raw_summary = entry.get("summary", "") or ""
     body = _strip_html(raw_summary) if raw_summary else None
     title = html.unescape(entry.get("title", "") or "")
@@ -385,7 +392,11 @@ def _entry_to_raw_item(entry: Any, *, subreddit: str) -> RawItem:
         body=body or None,
         author=_entry_author(entry),
         created_at=_entry_created_at(entry),
-        raw_json={**_entry_to_dict(entry), "subreddit": subreddit},
+        raw_json={
+            **_entry_to_dict(entry),
+            "subreddit": subreddit,
+            "group_key": group_key,
+        },
     )
 
 

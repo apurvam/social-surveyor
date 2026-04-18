@@ -234,6 +234,7 @@ class XSource(Source):
                 "tweet": tweet,
                 "author": author,
                 "query_name": xq.name,
+                "group_key": f"x:{xq.name}",
             },
         )
 

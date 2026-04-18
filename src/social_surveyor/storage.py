@@ -212,6 +212,116 @@ class Storage:
         ).fetchone()
         return int(row["total"])
 
+    # --- stats helpers ---------------------------------------------------
+
+    _UNKNOWN_GROUP = "(unknown query)"
+
+    def count_items_by_window(self, since: datetime | None = None) -> dict[str, int]:
+        """Count items per ``source`` since ``since`` (None = all time)."""
+        if since is None:
+            rows = self._conn.execute(
+                "SELECT source, COUNT(*) AS c FROM items GROUP BY source"
+            ).fetchall()
+        else:
+            rows = self._conn.execute(
+                "SELECT source, COUNT(*) AS c FROM items WHERE created_at >= ? GROUP BY source",
+                (_to_iso(since),),
+            ).fetchall()
+        return {r["source"]: int(r["c"]) for r in rows}
+
+    def count_items_by_group(
+        self, since: datetime | None = None
+    ) -> list[tuple[str, int]]:
+        """Items per ``raw_json.group_key``, newest-first by count.
+
+        Pre-``group_key`` items are surfaced under the literal
+        ``(unknown query)`` bucket rather than silently dropped —
+        see Session 2.5's decision to avoid inference-based backfill.
+        """
+        where = ""
+        params: tuple[object, ...] = ()
+        if since is not None:
+            where = "WHERE created_at >= ?"
+            params = (_to_iso(since),)
+        rows = self._conn.execute(
+            f"""
+            SELECT
+                COALESCE(json_extract(raw_json, '$.group_key'), ?) AS group_key,
+                COUNT(*) AS c
+            FROM items
+            {where}
+            GROUP BY group_key
+            ORDER BY c DESC
+            """,
+            (self._UNKNOWN_GROUP, *params),
+        ).fetchall()
+        return [(str(r["group_key"]), int(r["c"])) for r in rows]
+
+    def list_item_ids(self, source: str | None = None) -> list[str]:
+        """Return canonical ``{source}:{platform_id}`` ids for every item.
+
+        Used by the labeler to build the "already-labeled" exclusion set
+        and the unlabeled queue.
+        """
+        if source is None:
+            rows = self._conn.execute(
+                "SELECT source, platform_id FROM items ORDER BY created_at DESC"
+            ).fetchall()
+        else:
+            rows = self._conn.execute(
+                "SELECT source, platform_id FROM items "
+                "WHERE source = ? ORDER BY created_at DESC",
+                (source,),
+            ).fetchall()
+        return [f"{r['source']}:{r['platform_id']}" for r in rows]
+
+    def get_item_by_id(
+        self, source: str, platform_id: str
+    ) -> dict[str, Any] | None:
+        row = self._conn.execute(
+            "SELECT * FROM items WHERE source = ? AND platform_id = ?",
+            (source, platform_id),
+        ).fetchone()
+        if row is None:
+            return None
+        return self._row_to_dict(row)
+
+    def list_items_in_group(
+        self,
+        group_key: str,
+        *,
+        limit: int = 8,
+        offset: int = 0,
+    ) -> list[dict[str, Any]]:
+        """Items in a configured-query bucket, newest-first.
+
+        ``group_key`` of :attr:`_UNKNOWN_GROUP` returns items whose
+        ``raw_json.group_key`` is absent.
+        """
+        if group_key == self._UNKNOWN_GROUP:
+            rows = self._conn.execute(
+                """
+                SELECT * FROM items
+                WHERE json_extract(raw_json, '$.group_key') IS NULL
+                ORDER BY created_at DESC
+                LIMIT ? OFFSET ?
+                """,
+                (limit, offset),
+            ).fetchall()
+        else:
+            rows = self._conn.execute(
+                """
+                SELECT * FROM items
+                WHERE json_extract(raw_json, '$.group_key') = ?
+                ORDER BY created_at DESC
+                LIMIT ? OFFSET ?
+                """,
+                (group_key, limit, offset),
+            ).fetchall()
+        return [self._row_to_dict(r) for r in rows]
+
+    # --- api usage (continued) -------------------------------------------
+
     def api_usage_by_query(self, source: str, since: datetime) -> dict[str, int]:
         rows = self._conn.execute(
             """

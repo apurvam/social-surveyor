@@ -70,7 +70,11 @@ class HackerNewsSource(Source):
 
             hits = self._get_hits(params)
             new_max_cursor = max((int(h["created_at_i"]) for h in hits), default=None)
-            query_items = [self._to_raw_item(h) for h in hits if self._is_allowed(h)]
+            query_items = [
+                self._to_raw_item(h, group_key=f"hackernews:{query}")
+                for h in hits
+                if self._is_allowed(h)
+            ]
             items.extend(query_items)
 
             log.info(
@@ -99,7 +103,11 @@ class HackerNewsSource(Source):
             }
             hits = self._get_hits(params)
             fetched_count += len(hits)
-            kept = [self._to_raw_item(h) for h in hits if self._is_allowed(h)]
+            kept = [
+                self._to_raw_item(h, group_key=f"hackernews:{query}")
+                for h in hits
+                if self._is_allowed(h)
+            ]
             items.extend(kept)
             log.debug(
                 "hackernews.backfill.search",
@@ -140,7 +148,7 @@ class HackerNewsSource(Source):
         return list(resp.json().get("hits", []))
 
     @staticmethod
-    def _to_raw_item(hit: dict[str, Any]) -> RawItem:
+    def _to_raw_item(hit: dict[str, Any], *, group_key: str) -> RawItem:
         tags = set(hit.get("_tags", []))
         is_comment = "comment" in tags
         object_id = str(hit["objectID"])
@@ -171,5 +179,5 @@ class HackerNewsSource(Source):
             body=cleaned_body or None,
             author=author,
             created_at=created_at,
-            raw_json=hit,
+            raw_json={**hit, "group_key": group_key},
         )

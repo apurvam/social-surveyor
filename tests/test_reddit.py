@@ -53,7 +53,9 @@ def _mock_client(
 
 def test_entry_to_raw_item_maps_story() -> None:
     parsed = feedparser.parse(FIXTURE_XML.encode("utf-8"))
-    item = _entry_to_raw_item(parsed.entries[0], subreddit="devops")
+    item = _entry_to_raw_item(
+        parsed.entries[0], subreddit="devops", group_key="reddit:r/devops/test"
+    )
 
     assert item.source == "reddit"
     assert item.platform_id == "t3_abc123"
@@ -85,7 +87,9 @@ def test_strip_html_handles_reddit_selftext_markup() -> None:
 
 def test_entry_author_strips_u_prefix() -> None:
     parsed = feedparser.parse(FIXTURE_XML.encode("utf-8"))
-    item = _entry_to_raw_item(parsed.entries[1], subreddit="devops")
+    item = _entry_to_raw_item(
+        parsed.entries[1], subreddit="devops", group_key="reddit:r/devops/test"
+    )
     # feedparser sometimes exposes `/u/bob_sre` — we normalize to `bob_sre`.
     assert item.author == "bob_sre"
 

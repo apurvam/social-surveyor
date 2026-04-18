@@ -13,6 +13,7 @@ import typer
 from dotenv import load_dotenv
 
 from . import __version__
+from .cli_stats import run_stats
 from .config import ConfigError, ProjectConfig, load_project_config
 from .log_config import configure_logging
 from .sources.base import Source, SourceInitError
@@ -313,6 +314,29 @@ def usage(
         _print_json(report)
     finally:
         db.close()
+
+
+@app.command()
+def stats(
+    project: Annotated[str, typer.Option("--project", help="Project name.")],
+) -> None:
+    """One-screen DB summary: per-source counts, query groups, label status.
+
+    The "(unknown query)" bucket is pre-group_key items from before
+    Session 2.75 — they age out as new polls come in; we deliberately
+    don't backfill-by-inference.
+    """
+    # Loading the project config is optional for stats (we only need the
+    # DB path), but it validates the project dir exists, giving a nicer
+    # error than "no DB at …".
+    _load_or_exit(project)
+    db_path = _db_path(project)
+    try:
+        out = run_stats(project, db_path, Path("projects"))
+    except typer.BadParameter as e:
+        typer.echo(str(e), err=True)
+        raise typer.Exit(code=1) from None
+    typer.echo(out)
 
 
 if __name__ == "__main__":  # pragma: no cover
