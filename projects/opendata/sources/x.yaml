@@ -11,12 +11,16 @@ queries:
     query: '(prometheus ("self-host" OR "long-term storage" OR "durable")) -is:retweet lang:en'
 
   - name: "competitor_pain"
-    # Three-clause AND: {TSDB context word} AND {product} AND {pain adjective}.
-    # The earlier `thanos OR ...` form matched Marvel villain tweets in
-    # droves; requiring a prometheus-adjacent context word disambiguates.
-    # Cortex has the same collision (brain/medical/ARM Cortex-M) which the
-    # context clause also handles.
-    query: '(prometheus OR kubernetes OR metrics OR observability OR tsdb) (mimir OR thanos OR cortex OR victoriametrics) (complex OR pain OR nightmare OR expensive OR "gave up") -is:retweet lang:en'
+    # Two-clause AND: {TSDB context word} AND {product}. Co-mention of
+    # a Prometheus-adjacent context term with a competing TSDB name is
+    # already a strong signal — requiring an explicit pain adjective
+    # on top was over-filtering (the earlier version returned 0 items
+    # per poll). The classifier reads full bodies and can judge
+    # pain vs praise itself.
+    # The context clause still handles the "thanos = Marvel villain"
+    # and "cortex = brain/ARM" ambiguities by forcing co-occurrence
+    # with a TSDB-adjacent term.
+    query: '(prometheus OR kubernetes OR metrics OR observability OR tsdb) (mimir OR thanos OR cortex OR victoriametrics) -is:retweet lang:en'
 
 max_results_per_query: 100
 poll_interval_minutes: 10

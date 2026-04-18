@@ -30,35 +30,38 @@ subreddits:
   - monitoring
 
 queries:
-  # Observability cost pain. Datadog coverage is intentionally broad —
-  # the same bill complaint comes in many phrasings ("pricing" vs
-  # "invoice" vs "overage"), and misses are more expensive than a few
-  # extra dedup hits.
-  - "datadog cost"
-  - "datadog expensive"
-  - "datadog bill"
-  - "datadog pricing"
-  - "datadog invoice"
-  - "datadog overage"
-  - "new relic bill"
-  - "grafana cloud expensive"
-  - "observability bill"
+  # Observability cost pain. Phrase-quoted because Reddit search does
+  # AND-of-tokens on unquoted multi-word queries. Live probe r/devops:
+  # `datadog cost` (AND) returned 97 items; `"datadog cost"` (phrase)
+  # returned 10 — ~90% noise reduction by phrase-quoting. Same pattern
+  # applies to all the common-word variants below.
+  - '"datadog cost"'
+  - '"datadog expensive"'
+  - '"datadog bill"'
+  - '"datadog pricing"'
+  - '"datadog invoice"'
+  - '"datadog overage"'
+  - '"new relic bill"'
+  - '"grafana cloud"'          # drop "expensive" qualifier, same pattern as HN
+  - '"observability bill"'
 
-  # Prometheus long-term storage
-  - "prometheus long term"
-  - "prometheus storage"
-  - "self host prometheus"
-  - "prometheus retention"
+  # Prometheus long-term storage. Phrase-quoted for the same reason:
+  # "storage", "long term", "retention" are common English words that
+  # match lots of unrelated posts on AND-of-tokens.
+  - '"prometheus long term"'
+  - '"prometheus storage"'
+  - '"self host prometheus"'
+  - '"prometheus retention"'
 
-  # Competitor mentions
+  # Competitor mentions. Single distinctive words don't need phrase
+  # quoting; `cortex prometheus` is two AND tokens where "prometheus"
+  # disambiguates the generic "cortex".
   - "thanos"
   - "mimir"
   - "cortex prometheus"
-  # Same splinter as HN: the single-token query misses posts that spell
-  # the product as two words. Live probe across r/devops + r/sre +
-  # r/observability + r/kubernetes + r/PrometheusMonitoring + r/grafana
-  # showed 29 posts mentioning "victoria metrics" that the compact form
-  # didn't catch. Both spellings run; storage dedup absorbs the overlap.
+  # Both VM spellings: live probe across 6 key subs showed 29 unique
+  # "victoria metrics" posts the single-token form missed. Storage
+  # dedup absorbs the ~60% overlap.
   - "victoriametrics"
   - '"victoria metrics"'
 
