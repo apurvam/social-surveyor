@@ -13,12 +13,14 @@
 # would be too loose.
 
 queries:
-  # Observability pain. The broad `datadog` / `new relic` product-name
-  # queries were tried and DROPped in Session 2.75 triage: too many
-  # matches in the 30-day window had the product mentioned only in
-  # truncated-preview-invisible regions (past position 300 in long
-  # comments), making triage unreadable. Re-add once the classifier
-  # can read full bodies server-side.
+  # Observability pain. `datadog` and `new relic` were re-introduced
+  # after the typoTolerance=false fix — earlier DROPs were largely
+  # caused by Algolia's default typo tolerance matching `catalog` and
+  # similar words, not by the queries themselves being too broad.
+  # Re-triage will show whether the product-name approach now works
+  # pre-classifier, or still needs tighter phrasing.
+  - "datadog"
+  - '"new relic"'
   - '"observability bill"'
   - "grafana cloud expensive"
 
