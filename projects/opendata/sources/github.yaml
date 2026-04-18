@@ -2,24 +2,23 @@
 # Queries run in two scopes per poll: default (issue body/title) and
 # in:comments (comments matching the query text, fetched individually).
 #
-# Session 2.75 triage: the earlier broad queries (prometheus long term
-# retention, datadog replacement observability, thanos OR mimir OR
-# cortex cost, prometheus storage expensive) were all DROPped as
-# noise-heavy — they matched every tracking issue in public GitHub,
-# not the pain signals we care about. What remained was too narrow,
-# so we replaced them with two scoped queries.
+# GitHub search does NOT support OR across multiple org: qualifiers.
+# `victoriametrics (org:A OR org:B)` returns zero results; single
+# `victoriametrics org:A` works. So the "mentions of VM inside the
+# competing project orgs" signal is expressed as one query per org.
 
 queries:
-  # Narrow direct comparison; rare but high-signal when it fires.
-  - q: "VictoriaMetrics vs thanos"
+  # VictoriaMetrics mentions inside each competing project's issue
+  # tracker. Comments of the form "we switched to VM from Thanos" or
+  # "evaluating VM as an alternative" are the intended signal; the
+  # in:comments scope follow-up fetches the actual matching comments.
+  - q: "victoriametrics org:prometheus"
     type: issues
-
-  # Cross-competitor intel: comments mentioning VictoriaMetrics inside
-  # the Prometheus ecosystem's own org issue trackers. When someone on
-  # a Thanos/Mimir/Cortex thread mentions VM as an alternative, that's
-  # a strong "we're evaluating a migration" signal. The in:comments
-  # scope follow-up fetches and filters the actual comments.
-  - q: "victoriametrics (org:prometheus OR org:grafana OR org:thanos-io OR org:cortexproject)"
+  - q: "victoriametrics org:grafana"
+    type: issues
+  - q: "victoriametrics org:thanos-io"
+    type: issues
+  - q: "victoriametrics org:cortexproject"
     type: issues
 
 orgs_watchlist:
@@ -30,7 +29,7 @@ orgs_watchlist:
   - VictoriaMetrics
 
 max_results_per_query: 30
-# Belt-and-suspenders against runaway comment fetches. Worst case under
-# the current config (2 queries × 30 results each with in:comments
-# scope) is 60 issues, well under this cap.
+# Worst case under current config (4 queries × 30 results each with
+# in:comments scope) is 120 issues; 100 caps comment fetches before
+# that. Under GitHub's 5k/hr rate limit either way.
 max_comment_fetches_per_poll: 100
