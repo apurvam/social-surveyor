@@ -54,7 +54,13 @@ queries:
   - "thanos"
   - "mimir"
   - "cortex prometheus"
+  # Same splinter as HN: the single-token query misses posts that spell
+  # the product as two words. Live probe across r/devops + r/sre +
+  # r/observability + r/kubernetes + r/PrometheusMonitoring + r/grafana
+  # showed 29 posts mentioning "victoria metrics" that the compact form
+  # didn't catch. Both spellings run; storage dedup absorbs the overlap.
   - "victoriametrics"
+  - '"victoria metrics"'
 
 limit_per_query: 100
 time_filter: week
