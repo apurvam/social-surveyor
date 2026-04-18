@@ -5,6 +5,14 @@
 # Queries are intentionally broad (low precision, high recall) — the
 # classifier is the precision layer. Dedupe is free, so overlap between
 # queries is fine. Tune after we've seen ~500 posts come through.
+#
+# Session 2.5: Reddit moved from PRAW to RSS after Reddit closed
+# self-service API access. No credentials; `reddit_username` just
+# builds a polite User-Agent. Replace the placeholder with apurva's
+# actual Reddit username before running live.
+
+reddit_username: YOUR_REDDIT_USERNAME
+min_seconds_between_requests: 2.0
 
 subreddits:
   - devops

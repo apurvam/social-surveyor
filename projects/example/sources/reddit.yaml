@@ -1,6 +1,11 @@
 # Example Reddit source config — generic devtool monitoring.
 # Fork this project and replace the subreddits/queries with ones that
 # match your ICP.
+#
+# Session 2.5 moved Reddit from PRAW (OAuth) to RSS. No credentials
+# are required, but Reddit aggressively rate-limits generic user
+# agents — `reddit_username` is required and used to build a polite
+# User-Agent header. Set it to your own Reddit username.
 
 subreddits:
   - devops
@@ -16,5 +21,9 @@ queries:
   - "anyone using"
   - "best tool for"
 
+reddit_username: YOUR_REDDIT_USERNAME
+
 limit_per_query: 100
 time_filter: week
+min_seconds_between_requests: 2.0
+
