@@ -11,3 +11,6 @@ build/
 .DS_Store
 .claude/settings.local.json
 
+# Triage reports are per-run scratch artifacts, not shared config.
+projects/*/triage_*.md
+
