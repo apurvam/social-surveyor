@@ -174,9 +174,7 @@ def run_triage(
             advance_page = True
             while True:
                 if advance_page:
-                    sample = db.list_items_in_group(
-                        group_key, limit=limit, offset=offset
-                    )
+                    sample = db.list_items_in_group(group_key, limit=limit, offset=offset)
                     if not sample and offset == 0:
                         # Edge case: count nonzero but items vanished.
                         break
@@ -227,9 +225,7 @@ def run_triage(
                     if 0 <= i < len(sample):
                         echo_fn(_render_expanded(sample[i]))
                     else:
-                        echo_fn(
-                            f"  {raw!r} out of range; expand index 1-{len(sample)}"
-                        )
+                        echo_fn(f"  {raw!r} out of range; expand index 1-{len(sample)}")
                     continue
                 decision = _KEY_TO_DECISION.get(raw)
                 if decision is None:
@@ -390,9 +386,7 @@ def _suggested_yaml_changes(decisions: list[Decision]) -> list[str]:
 
 
 def _refine_samples(decisions: list[Decision]) -> list[str]:
-    refines = [
-        d for d in decisions if d.decision == REFINE and not _is_unknown_bucket(d.group_key)
-    ]
+    refines = [d for d in decisions if d.decision == REFINE and not _is_unknown_bucket(d.group_key)]
     if not refines:
         return []
     out: list[str] = ["## REFINE — sample titles for context", ""]
