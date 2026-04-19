@@ -24,7 +24,18 @@ sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
     pkg-config \
     curl \
     ca-certificates \
-    awscli
+    unzip
+
+# --- AWS CLI v2 (Ubuntu 24.04 dropped the apt awscli package) ---
+if ! command -v aws >/dev/null 2>&1; then
+    echo "==> awscli: installing AWS CLI v2 for aarch64"
+    curl -LsSf https://awscli.amazonaws.com/awscli-exe-linux-aarch64.zip -o /tmp/awscliv2.zip
+    sudo unzip -q -o /tmp/awscliv2.zip -d /tmp/
+    sudo /tmp/aws/install --update
+    rm -rf /tmp/awscliv2.zip /tmp/aws
+else
+    echo "==> awscli: already installed at $(command -v aws)"
+fi
 
 # --- uv install (system-wide so both root and the service user can invoke it) ---
 if ! command -v uv >/dev/null 2>&1; then
