@@ -270,6 +270,13 @@ This session also introduces a first-run setup wizard that captures required cre
 
 **Non-goals:** Slack alerts, digest, routing (those come in session 4).
 
+**Lessons from Session 3 iteration (v1 → v2 → v2a → v3):**
+
+- Eval metrics measure the joint system of (classifier + labels + taxonomy). When metrics regress unexpectedly, any of the three could be the cause; don't assume the classifier is wrong until you've read the actual disagreement text.
+- Adding a category to the taxonomy requires relabeling items across all source categories that plausibly contain migrants, not just the obvious donor category. This happened twice in Session 3 and is now a Convention.
+- Prompt density has diminishing returns. The v2→v3 rule expansion (~1200→~2200 input tokens per call) improved some categories but created a magnet effect (Rule 3a read first + broadly framed → catchall behavior). Future prompt iterations should consider total length as a cost, not just rule correctness.
+- Preregistered predictions aren't about accuracy — magnitude predictions missed consistently — but about surfacing mental models of what the prompt change should do. Disagreements between predicted and actual outcomes are more informative than the numbers themselves.
+
 ### Session 4 — Routing, alerts, digest, handling
 
 **Scope:** Slack integration, urgency-based routing, immediate alerts, daily digest, mark-as-handled loop, explain command.
@@ -370,6 +377,7 @@ This session also introduces a first-run setup wizard that captures required cre
 - **Live verification is required for "complete."** Every source module must be verified against real APIs within 7 days of being written, or it does not count as "complete" in session acceptance. The session that introduces the source owns verification; if blocked (credentials, API policy, etc.), the next session must include the verification step as a prerequisite.
 - **Mocked tests do not satisfy live-API acceptance criteria.** Acceptance criteria involving live API calls are satisfied only when verified by the user with real credentials, not by mocked tests. Session PR descriptions must explicitly flag which criteria were verified live vs mock-only.
 - **Labels and classifier prompts are separately authored.** The labeling process (Session 2.75) produces ground-truth labels against an agreed category taxonomy. The classifier prompt (Session 3) is written to match the same taxonomy. When they disagree, treat it as a potential prompt bug or a potential label inconsistency, not automatically either one.
+- **Taxonomy changes trigger a full relabel pass across all potentially-affected source categories.** When a new category is added to `categories.yaml`, items that might migrate to it are not only in the obvious donor category. Walking only the donor category will leave stale labels in other categories and will cause the next eval run to misattribute classifier improvements as classifier regressions. Run `--reconsider` on every category that plausibly contains items for the new category, not just the one that seems most related. For opendata's `active_practitioner` addition, the full pass should have covered `self_host_intent`, `neutral_discussion`, and `off_topic` at minimum.
 
 ---
 
@@ -391,7 +399,7 @@ Updated as sessions reveal new decisions. Current open items:
 - **Multi-project conflicts:** if two projects poll the same subreddit, we fetch and store twice. Acceptable for now (different projects have different classifiers, different storage). Revisit if it becomes a cost issue.
 - **Refresh policy for mutable item metadata.** `upsert_item` is insert-if-new; we never refresh comment counts, scores, issue state, etc. Fine for classification (post content is immutable) but would be nice for digest annotations ("this post now has 230 upvotes, up from 40 when we first saw it"). Revisit in Session 4 or later.
 - **Silent per-source failures.** Our multi-source poll catches exceptions and logs `poll.source.failed`, which covers crashing sources. It does *not* catch silent failures (a source that starts returning `[]` because an upstream API schema changed, or a hang where no timeout fires). Session 5's `/health` endpoint will track "last successful poll per source per project" so staleness alerts catch these; until then, eyeball the per-source row counts periodically.
-- **Category taxonomy stability.** Categories defined in Session 2.75's `categories.yaml` will be used by both the labeler and (in Session 3) the classifier. Renaming or restructuring categories after labeling has started invalidates prior labels. Treat the taxonomy as a decision to be made deliberately early and then held stable; if it must change, there should be a migration step in the change.
+- **Category taxonomy stability.** Categories defined in Session 2.75's `categories.yaml` will be used by both the labeler and (in Session 3) the classifier. Renaming or restructuring categories after labeling has started invalidates prior labels. Treat the taxonomy as a decision to be made deliberately early and then held stable; if it must change, there should be a migration step in the change. **Note from Session 3 iteration:** even adding a new category (without renaming existing ones) requires a full relabel pass across all potentially-affected source categories, not just the obvious donor. Label drift across untouched categories will show up as apparent classifier regressions in subsequent evals. See the "Taxonomy changes trigger a full relabel pass" convention.
 - alert_worthy should be a per-category config field, not hardcoded in the eval harness. Currently cost_complaint + self_host_intent + competitor_pain is hardcoded. When active_practitioner was added, we explicitly told the eval harness to exclude it. When the second project (agent-infra) starts, this hardcoding will break immediately. Factor out in the first session that starts agent-infra, or proactively in a small cleanup session.  
 
 ---
