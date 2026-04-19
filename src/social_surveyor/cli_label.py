@@ -19,6 +19,7 @@ from .labeling import (
     LabelEntry,
     append_label,
     ensure_labels_file,
+    iter_label_entries,
     labeled_ids,
     make_entry,
     pop_last_label,
@@ -75,6 +76,45 @@ def _build_queue(
         queue.append((src, platform_id))
     if randomize:
         random.shuffle(queue)
+    return queue
+
+
+def _build_disagreement_queue(
+    db: Storage,
+    labels_file: Path,
+    prompt_version: str,
+    source: str | None,
+) -> list[tuple[str, str]]:
+    """Queue = labeled items whose classification (under ``prompt_version``)
+    disagrees with the human category.
+
+    Items without a classification under this version are excluded —
+    ``--disagreements`` is specifically for re-examining items where
+    both sides have already weighed in and disagreed. Classifying new
+    items is the job of ``classify``.
+
+    Applies latest-wins per item_id on the label side; anything the
+    labeler touches in this loop appends a new entry that wins next
+    time.
+    """
+    entries = iter_label_entries(labels_file)
+    latest_by_id: dict[str, LabelEntry] = {}
+    for e in entries:
+        prior = latest_by_id.get(e.item_id)
+        if prior is None or e.labeled_at > prior.labeled_at:
+            latest_by_id[e.item_id] = e
+
+    queue: list[tuple[str, str]] = []
+    for item_id, label in latest_by_id.items():
+        src, _, platform_id = item_id.partition(":")
+        if source is not None and src != source:
+            continue
+        classification = db.get_classification(item_id, prompt_version)
+        if classification is None:
+            continue
+        if classification["category"] == label.category:
+            continue
+        queue.append((src, platform_id))
     return queue
 
 
@@ -159,10 +199,18 @@ def run_label(
     *,
     source: str | None,
     randomize: bool,
+    disagreements_for_version: str | None = None,
     input_fn=input,
     echo_fn=typer.echo,
 ) -> dict[str, int]:
     """Run the interactive label loop and return a result counter.
+
+    When ``disagreements_for_version`` is set, the queue is built from
+    labeled items whose classification under that prompt_version
+    disagrees with the human label — the "the classifier said X but I
+    said Y" flow. In that mode, "already labeled" is not a skip reason;
+    the user is explicitly re-examining these items. New label appends
+    win per latest-wins semantics.
 
     ``input_fn`` and ``echo_fn`` are dependency-injected so tests can
     feed scripted input without touching a real terminal.
@@ -174,13 +222,15 @@ def run_label(
         raise typer.BadParameter(f"no DB at {db_path} yet — run a poll first")
 
     with Storage(db_path) as db:
-        queue = _build_queue(db, labels_file, source, randomize)
+        if disagreements_for_version is not None:
+            queue = _build_disagreement_queue(db, labels_file, disagreements_for_version, source)
+            mode_desc = f"disagreements vs prompt_version={disagreements_for_version!r}"
+        else:
+            queue = _build_queue(db, labels_file, source, randomize)
+            mode_desc = "random" if randomize else "newest-first"
         session = _Session(cfg, db, labels_file, queue)
 
-        echo_fn(
-            f"labeling {session.total} items for project '{project}' "
-            f"({'random' if randomize else 'newest-first'} order)"
-        )
+        echo_fn(f"labeling {session.total} items for project '{project}' ({mode_desc} order)")
         echo_fn(_render_urgency_scale(cfg))
 
         while session.index < session.total:
@@ -191,6 +241,13 @@ def run_label(
                 session.index += 1
                 continue
 
+            if disagreements_for_version is not None:
+                _echo_disagreement_context(
+                    db,
+                    f"{src}:{platform_id}",
+                    disagreements_for_version,
+                    echo_fn,
+                )
             echo_fn(_render_item(item, cfg, session.index + 1, session.total))
             raw_cat = input_fn("Category (number or id, s=skip, b=back, q=quit): ").strip()
 
@@ -241,6 +298,27 @@ def run_label(
         "skipped": session.skipped,
         "remaining": max(0, session.total - session.index),
     }
+
+
+def _echo_disagreement_context(
+    db: Storage,
+    item_id: str,
+    prompt_version: str,
+    echo_fn: Any,
+) -> None:
+    """Show the current classifier prediction + prior human label so the
+    operator can see what they're being asked to re-examine."""
+    classification = db.get_classification(item_id, prompt_version)
+    if classification is None:
+        return
+    echo_fn("")
+    echo_fn(
+        f"[classifier {prompt_version}] said: "
+        f"{classification['category']} urgency={classification['urgency']}"
+    )
+    reasoning = classification.get("reasoning")
+    if reasoning:
+        echo_fn(f"  reasoning: {reasoning}")
 
 
 def _prompt_urgency(input_fn, echo_fn) -> int | None:

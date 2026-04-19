@@ -216,3 +216,122 @@ def test_label_reopens_loaded_categories(tmp_path: Path) -> None:
     root, _ = _seed(tmp_path, n_items=0)
     cfg = load_categories("demo", projects_root=root)
     assert [c.id for c in cfg.categories] == ["cost_complaint", "self_host_intent", "off_topic"]
+
+
+def test_label_disagreements_queue_only_includes_category_mismatches(tmp_path: Path) -> None:
+    root, db_path = _seed(tmp_path, n_items=3)
+    labels_file = ensure_labels_file("demo", projects_root=root)
+
+    # Pre-label all three items.
+    append_label(
+        labels_file,
+        make_entry(item_id="hackernews:100", category="cost_complaint", urgency=8, note=None),
+    )
+    append_label(
+        labels_file,
+        make_entry(item_id="hackernews:101", category="off_topic", urgency=0, note=None),
+    )
+    append_label(
+        labels_file,
+        make_entry(item_id="hackernews:102", category="self_host_intent", urgency=7, note=None),
+    )
+
+    # Prime v1 classifications: 100 agrees, 101 disagrees, 102 has no
+    # classification (should be excluded from the disagreement queue).
+    with Storage(db_path) as db:
+        db.save_classification(
+            item_id="hackernews:100",
+            category="cost_complaint",  # agrees
+            urgency=8,
+            reasoning="ok",
+            prompt_version="v1",
+            model="m",
+            input_tokens=10,
+            output_tokens=5,
+            classified_at=datetime(2026, 4, 18, tzinfo=UTC),
+            raw_response={},
+        )
+        db.save_classification(
+            item_id="hackernews:101",
+            category="cost_complaint",  # disagrees (human said off_topic)
+            urgency=7,
+            reasoning="mis",
+            prompt_version="v1",
+            model="m",
+            input_tokens=10,
+            output_tokens=5,
+            classified_at=datetime(2026, 4, 18, tzinfo=UTC),
+            raw_response={},
+        )
+
+    script = _Script(["q"])  # quit immediately — we're just checking queue size
+    result = run_label(
+        "demo",
+        db_path,
+        root,
+        source=None,
+        randomize=False,
+        disagreements_for_version="v1",
+        input_fn=script.input,
+        echo_fn=script.echo,
+    )
+    # Only the one mismatch (101) is in the queue. 100 agrees; 102 has
+    # no classification.
+    assert result["total"] == 1
+    # The operator's context line shows what the classifier said.
+    echoed = "\n".join(script.echoed)
+    assert "[classifier v1] said:" in echoed
+    assert "cost_complaint" in echoed
+
+
+def test_label_disagreements_relabel_appends_new_entry(tmp_path: Path) -> None:
+    root, db_path = _seed(tmp_path, n_items=1)
+    labels_file = ensure_labels_file("demo", projects_root=root)
+
+    # Prior human label: cost_complaint. Classifier said self_host_intent.
+    append_label(
+        labels_file,
+        make_entry(item_id="hackernews:100", category="cost_complaint", urgency=8, note=None),
+    )
+    with Storage(db_path) as db:
+        db.save_classification(
+            item_id="hackernews:100",
+            category="self_host_intent",
+            urgency=6,
+            reasoning="x",
+            prompt_version="v1",
+            model="m",
+            input_tokens=10,
+            output_tokens=5,
+            classified_at=datetime(2026, 4, 18, tzinfo=UTC),
+            raw_response={},
+        )
+
+    # Operator reviews the disagreement and decides the classifier was
+    # right — relabels as self_host_intent.
+    script = _Script(
+        [
+            "2",  # category index 2 (self_host_intent in CATEGORIES_YAML)
+            "6",
+            "classifier was right",
+            "q",
+        ]
+    )
+    run_label(
+        "demo",
+        db_path,
+        root,
+        source=None,
+        randomize=False,
+        disagreements_for_version="v1",
+        input_fn=script.input,
+        echo_fn=script.echo,
+    )
+
+    # Two entries in the file now (original + correction). Latest wins.
+    entries = iter_label_entries(labels_file)
+    assert len(entries) == 2
+    # The newer one is the self_host_intent correction.
+    latest = max(entries, key=lambda e: e.labeled_at)
+    assert latest.category == "self_host_intent"
+    assert latest.note == "classifier was right"

@@ -403,6 +403,25 @@ def label(
         bool,
         typer.Option("--random", help="Sample across the time range instead of newest-first."),
     ] = False,
+    disagreements: Annotated[
+        bool,
+        typer.Option(
+            "--disagreements",
+            help=(
+                "Walk labeled items whose classification disagrees with the "
+                "human label, under the prompt_version from classifier.yaml "
+                "(or --prompt-version). Useful after running eval to "
+                "re-examine specific items."
+            ),
+        ),
+    ] = False,
+    prompt_version: Annotated[
+        str | None,
+        typer.Option(
+            "--prompt-version",
+            help="Override prompt_version for --disagreements mode.",
+        ),
+    ] = None,
 ) -> None:
     """Walk through unlabeled items and record category + urgency + optional note.
 
@@ -419,6 +438,20 @@ def label(
             "(--no-resume is currently equivalent to --resume; items in labeled.jsonl are always skipped)"
         )
 
+    disagreements_for_version: str | None = None
+    if disagreements:
+        # Resolve the effective prompt_version for disagreement mode:
+        # CLI flag > classifier.yaml. Fail loudly if neither is usable
+        # rather than silently defaulting.
+        from .config import load_classifier_config
+
+        try:
+            clf_cfg = load_classifier_config(project)
+        except ConfigError as e:
+            typer.echo(str(e), err=True)
+            raise typer.Exit(code=2) from None
+        disagreements_for_version = prompt_version or clf_cfg.prompt_version
+
     try:
         result = run_label(
             project,
@@ -426,6 +459,7 @@ def label(
             Path("projects"),
             source=source,
             randomize=randomize,
+            disagreements_for_version=disagreements_for_version,
         )
     except typer.BadParameter as e:
         typer.echo(str(e), err=True)
