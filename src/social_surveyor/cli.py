@@ -724,6 +724,17 @@ def eval(
             ),
         ),
     ] = False,
+    since: Annotated[
+        str | None,
+        typer.Option(
+            "--since",
+            help=(
+                "ISO-8601 date (YYYY-MM-DD). Restrict the eval set to items "
+                "labeled on or after this date. Useful for drift detection: "
+                "'how is v3 doing on items I labeled this month?'"
+            ),
+        ),
+    ] = None,
 ) -> None:
     """Score the classifier against labeled.jsonl.
 
@@ -733,6 +744,14 @@ def eval(
     eval; cold start hits ~2s per Haiku call. ``--re-score`` skips the
     classifier entirely and reports missing-cache items as excluded.
     """
+    since_dt: datetime | None = None
+    if since is not None:
+        try:
+            since_dt = datetime.fromisoformat(since).replace(tzinfo=UTC)
+        except ValueError:
+            typer.echo(f"--since must be ISO-8601 (YYYY-MM-DD), got {since!r}", err=True)
+            raise typer.Exit(code=1) from None
+
     try:
         run_eval(
             project,
@@ -742,6 +761,7 @@ def eval(
             verbose=verbose,
             export_path=export,
             re_score=re_score,
+            since=since_dt,
         )
     except typer.BadParameter as e:
         typer.echo(str(e), err=True)
