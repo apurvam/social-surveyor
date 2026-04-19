@@ -233,6 +233,8 @@ This session also introduces a first-run setup wizard that captures required cre
 
 ### Session 3 — Classifier + eval harness
 
+**Status:** Complete, shipped. Active prompt is v3 against a 143-item eval set (GitHub removed from opendata during iteration; source module preserved for future projects). Final metrics: 61.5% overall accuracy, alert-worthy precision 0.67 / recall 0.23, high-urgency MAE 4.43. Iteration arc: v1 baseline 47.7% → v2 structural rules 57.0% → taxonomy extension with `active_practitioner` + relabel pass → v3 teaches `active_practitioner` (61.5%). A post-ship v3.5 urgency-calibration attempt was reverted — it didn't move either ship criterion (recall stayed 0.23, high-urgency MAE went up 0.20). All acceptance criteria met except the aspirational alert-worthy P/R ≥ 0.75 targets; low recall is the open gap, deferred to post-Session-4 once production use provides more signal on what the classifier actually misses in practice.
+
 **This session has a sub-plan.** The classifier prompt is the core product and deserves more ceremony than "write prompt, call API."
 
 **Scope:** Haiku integration, classifier module, initial prompt v1, eval harness. Labels and categories exist from Session 2.75.
