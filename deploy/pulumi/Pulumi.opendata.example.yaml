@@ -1,0 +1,12 @@
+# Copy this file to Pulumi.opendata.yaml and fill in the values for your
+# AWS account. Do not commit Pulumi.opendata.yaml — it contains account-
+# specific infrastructure IDs. The real file is gitignored.
+config:
+  aws:region: us-west-2  # whichever region your VPC lives in
+  social-surveyor:vpc_id: vpc-REPLACE_ME
+  social-surveyor:subnet_id: subnet-REPLACE_ME
+  social-surveyor:instance_type: t4g.micro
+  social-surveyor:project_name: opendata
+  social-surveyor:ssm_parameter_prefix: /social-surveyor/opendata
+  # Optional — leave blank to rely entirely on SSM for instance access
+  social-surveyor:ssh_key_name: ""

@@ -1,0 +1,37 @@
+[Unit]
+Description=social-surveyor (%i)
+Documentation=https://github.com/apurvam/social-surveyor
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=social-surveyor
+Group=social-surveyor
+WorkingDirectory=/opt/social-surveyor
+EnvironmentFile=/etc/social-surveyor/%i.env
+
+# SQLite DB and any per-project state live outside the repo so rsync/git
+# deploys don't touch them.
+Environment="SOCIAL_SURVEYOR_DATA_DIR=/var/lib/social-surveyor/%i"
+
+# ExecStartPre with '+' prefix runs as root (needed for chown).
+ExecStartPre=+/bin/mkdir -p /var/lib/social-surveyor/%i
+ExecStartPre=+/bin/chown -R social-surveyor:social-surveyor /var/lib/social-surveyor/%i
+
+ExecStart=/usr/local/bin/uv run --directory /opt/social-surveyor social-surveyor run --project %i
+
+Restart=on-failure
+RestartSec=30s
+
+# journald captures stdout/stderr; view via `journalctl -u social-surveyor@%i`
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=social-surveyor-%i
+
+# Resource ceilings for a single t4g.micro running one project.
+MemoryMax=256M
+TasksMax=32
+
+[Install]
+WantedBy=multi-user.target

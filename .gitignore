@@ -19,3 +19,9 @@ projects/*/triage_*.md
 *.swo
 *~
 
+# Pulumi stack configs with real infrastructure IDs, plus Pulumi venv
+deploy/pulumi/Pulumi.*.yaml
+!deploy/pulumi/Pulumi.yaml
+!deploy/pulumi/Pulumi.*.example.yaml
+deploy/pulumi/venv/
+

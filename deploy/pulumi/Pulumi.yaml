@@ -1,0 +1,8 @@
+name: social-surveyor
+description: Infrastructure for social-surveyor deployment
+runtime:
+  name: python
+  options:
+    virtualenv: venv
+backend:
+  url: https://api.pulumi.com
