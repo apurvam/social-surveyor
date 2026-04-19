@@ -21,6 +21,7 @@ from .cli_eval import (
     run_eval,
 )
 from .cli_explain import run_explain
+from .cli_ingest import run_ingest
 from .cli_label import run_label, run_label_item
 from .cli_route import run_route
 from .cli_setup import run_setup
@@ -921,6 +922,27 @@ def digest(
             since=since_dt,
             limit=limit,
         )
+    except typer.BadParameter as e:
+        typer.echo(str(e), err=True)
+        raise typer.Exit(code=1) from None
+
+
+@app.command()
+def ingest(
+    project: Annotated[str, typer.Option("--project", help="Project name.")],
+    url: Annotated[
+        str,
+        typer.Option("--url", help="URL of an HN / Reddit / X item to capture."),
+    ],
+) -> None:
+    """Capture a manually-supplied URL: fetch, insert, classify.
+
+    No Slack routing — you already saw the item; no need to re-surface.
+    X ingestion counts against the daily read cap.
+    """
+    _load_or_exit(project)
+    try:
+        run_ingest(project, _db_path(project), Path("projects"), url=url)
     except typer.BadParameter as e:
         typer.echo(str(e), err=True)
         raise typer.Exit(code=1) from None
