@@ -26,14 +26,16 @@ Design notes specific to this session:
   line in that section points to the CLI inspection command. Keeps
   the digest's visual footprint consistent day to day regardless of
   per-category volume.
-- **Custom emoji are optional** — ``:reddit:`` / ``:hn:`` / ``:x:`` /
+- **Custom emoji are optional** — ``:reddit:`` / ``:hn:`` / ``:twitter:`` /
   ``:github:`` are assumed uploaded to the workspace. If they aren't,
-  Slack renders the literal text, which is an acceptable fallback.
+  Slack renders the literal text, which is an acceptable fallback. We
+  use ``:twitter:`` rather than Slack's built-in ``:x:``, which renders
+  as a red X mark and reads wrong next to a news item.
 """
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import UTC, date, datetime, timedelta
 from typing import Any
 
@@ -85,16 +87,27 @@ TOP_N_PER_CATEGORY = 5
 
 # Truncation bounds. 120 chars is what fits in a Slack section at a
 # normal window width; 200 on bodies is enough to skim without eating
-# the whole screen.
+# the whole screen. X gets a wider title cap because X posts top out at
+# 280 chars total — truncating mid-post would drop the entire payload
+# when we could render it in full.
 TITLE_MAX_CHARS = 120
+TITLE_MAX_CHARS_X = 280
 BODY_MAX_CHARS = 200
+
+
+def _title_max(source: str) -> int:
+    return TITLE_MAX_CHARS_X if source == "x" else TITLE_MAX_CHARS
+
 
 _FALLBACK_COLOR = "#555555"
 
 _SOURCE_EMOJI: dict[str, str] = {
     "reddit": ":reddit:",
     "hackernews": ":hn:",
-    "x": ":x:",
+    # :twitter: rather than Slack's built-in :x: (which renders as a
+    # red X mark / error glyph) — :twitter: is the custom workspace
+    # emoji the user uploaded.
+    "x": ":twitter:",
     "github": ":github:",
 }
 
@@ -109,10 +122,21 @@ class NotifierConfig:
     ``sv_command`` defaults to ``social-surveyor``. Forks that adopt the
     ``sv`` shell alias (documented in the README) set it to ``"sv"`` so
     the copy-paste lines are terse.
+
+    ``category_labels`` maps snake_case category ids to the human-
+    friendly labels from ``categories.yaml``. Used anywhere a category
+    is shown for human consumption (section headers, alert headers);
+    the snake_case id is what lands in the ``--category <id>`` code
+    subtexts, because that's what the CLI accepts.
     """
 
     project: str
     sv_command: str = "social-surveyor"
+    category_labels: dict[str, str] = field(default_factory=dict)
+
+    def category_display(self, category_id: str) -> str:
+        """Return the human-friendly label for ``category_id``, or the id itself."""
+        return self.category_labels.get(category_id, category_id)
 
 
 @dataclass(frozen=True)
@@ -169,8 +193,12 @@ def build_immediate_alert(item: NotifierItem, config: NotifierConfig) -> dict[st
     """
     color = CATEGORY_COLORS.get(item.category, _FALLBACK_COLOR)
 
-    header = f"{_source_label(item.source)} *{item.category}* · `urgency {item.urgency}`"
-    quote_lines: list[str] = [f"> *{_truncate(item.title or '(no title)', TITLE_MAX_CHARS)}*"]
+    header = (
+        f"{_source_label(item.source)}  *{config.category_display(item.category)}*  "
+        f"·  urgency {item.urgency}"
+    )
+    title = _truncate(item.title or "(no title)", TITLE_MAX_CHARS)
+    quote_lines: list[str] = [f"> {_linked_title(title, item.url)}"]
     if item.body:
         for line in _truncate(item.body, BODY_MAX_CHARS).splitlines() or [""]:
             quote_lines.append(f"> {line}")
@@ -258,19 +286,23 @@ def build_digest(
 
     blocks: list[dict[str, Any]] = []
 
-    # --- header ---
+    # --- top header ---
+    # Slack `header` blocks render noticeably larger than section text,
+    # which gives the digest a clear visual top. Header blocks are
+    # plain_text only (no mrkdwn), so we drop the `*bold*` wrapping —
+    # header text is already visually bold on its own.
     total_cost = stats.haiku_cost_usd + stats.x_cost_usd
-    header_text = (
-        f"📊 *Digest for {stats.day.isoformat()}* · "
-        f"{len(items)} items across {len(ordered_categories)} categories · "
-        f"{len(alerted)} alerted earlier · "
-        f"cost ${total_cost:.2f}"
-    )
     if not items:
-        # Zero-items case still sends a message so we know the pipeline
-        # is alive. Same header shape with a friendly body.
-        header_text = f"📊 *Digest for {stats.day.isoformat()}* · no new items in the last 24h"
-    blocks.append({"type": "section", "text": {"type": "mrkdwn", "text": header_text}})
+        top_header_text = f"📊 Digest for {stats.day.isoformat()} — no new items in the last 24h"
+    else:
+        items_noun = "item" if len(items) == 1 else "items"
+        cats_noun = "category" if len(ordered_categories) == 1 else "categories"
+        top_header_text = (
+            f"📊 Digest for {stats.day.isoformat()} · "
+            f"{len(items)} {items_noun} · {len(ordered_categories)} {cats_noun} · "
+            f"{len(alerted)} alerted · ${total_cost:.2f}"
+        )
+    blocks.append(_header_block(top_header_text))
 
     if not items:
         blocks.extend(_cost_and_correction_footer(stats, config))
@@ -279,16 +311,11 @@ def build_digest(
     # --- alerted-earlier section ---
     if alerted:
         blocks.append({"type": "divider"})
-        blocks.append(
-            {
-                "type": "section",
-                "text": {"type": "mrkdwn", "text": "🔔 *Alerted earlier today*"},
-            }
-        )
+        blocks.append(_header_block("🔔 Alerted earlier today"))
         for item in sorted(
             alerted, key=lambda i: (-(i.urgency), -(i.alerted_at or datetime.now(UTC)).timestamp())
         ):
-            blocks.append(_alerted_earlier_block(item))
+            blocks.append(_alerted_earlier_block(item, config))
 
     # --- per-category sections ---
     for cat in ordered_categories:
@@ -303,16 +330,18 @@ def build_digest(
 
         blocks.append({"type": "divider"})
         emoji = CATEGORY_EMOJI.get(cat, "•")
+        cat_display = config.category_display(cat)
         total_in_cat = len(cat_items_sorted)
+        noun = "item" if total_in_cat == 1 else "items"
         if overflow > 0:
             header_line = (
-                f"{emoji} *{cat}* · {total_in_cat} items (showing top {len(top)} by urgency)"
+                f"{emoji} {cat_display} · {total_in_cat} {noun} (top {len(top)} by urgency)"
             )
         else:
-            header_line = f"{emoji} *{cat}* · {total_in_cat} items"
-        blocks.append({"type": "section", "text": {"type": "mrkdwn", "text": header_line}})
+            header_line = f"{emoji} {cat_display} · {total_in_cat} {noun}"
+        blocks.append(_header_block(header_line))
         for item in top:
-            blocks.append(_digest_item_block(item))
+            blocks.append(_digest_item_block(item, config))
         if overflow > 0:
             blocks.append(
                 {
@@ -337,34 +366,87 @@ def build_digest(
 # --- block helpers -----------------------------------------------------------
 
 
-def _alerted_earlier_block(item: NotifierItem) -> dict[str, Any]:
-    """Compact single-item block for the 'alerted earlier' digest section."""
+def _alerted_earlier_block(item: NotifierItem, config: NotifierConfig) -> dict[str, Any]:
+    """Compact single-item block for the 'alerted earlier' digest section.
+
+    Source + human-friendly category, linked title, alerted-at
+    timestamp, trailing monospace ``<item_id>``. Author is omitted —
+    in daily scanning the author name adds little over the title and
+    source; when you click through, the discussion has them anyway.
+    """
     alerted_at = item.alerted_at or item.created_at
+    title = _truncate(item.title or "(no title)", _title_max(item.source))
+    cat_display = config.category_display(item.category)
     lines = [
-        f"{_source_label(item.source)} *{item.category}* · `u={item.urgency}`",
-        f"> *{_truncate(item.title or '(no title)', TITLE_MAX_CHARS)}*",
-        f"_by `{item.author or 'unknown'}` · alerted at {alerted_at.strftime('%H:%M')}_",
-        f"Item ID: `{item.item_id}`",
+        f"{_source_label(item.source)}  {cat_display}",
+        f"> {_linked_title(title, item.url)}",
+        f"_alerted at {alerted_at.strftime('%H:%M')}_",
+        f"`{item.item_id}`",
     ]
     return {"type": "section", "text": {"type": "mrkdwn", "text": "\n".join(lines)}}
 
 
-def _digest_item_block(item: NotifierItem) -> dict[str, Any]:
-    """One compact line per item inside a category section."""
+def _digest_item_block(item: NotifierItem, config: NotifierConfig) -> dict[str, Any]:
+    """One single-line item inside a category section.
+
+    Source emoji, linked title, trailing monospace item-id. No author,
+    no flag prefix on the id — the id is the one piece of tooling
+    metadata you'd copy into `sv label --item-id <id>` or `sv silence
+    --item-id <id>`, and Slack's code styling is enough to mark it as
+    "this is the paste target."
+
+    X-sourced items get a wider title cap (280 chars) because the
+    entire X post fits there — truncating would drop signal we could
+    otherwise show in full.
+    """
     silenced_prefix = "🔕 " if item.silenced else ""
-    title = _truncate(item.title or "(no title)", TITLE_MAX_CHARS)
-    author = item.author or "unknown"
+    title = _truncate(item.title or "(no title)", _title_max(item.source))
     line = (
-        f"{silenced_prefix}{_source_label(item.source)} `u={item.urgency}` "
-        f"*{title}* _by `{author}`_ · `{item.item_id}`"
+        f"{silenced_prefix}{_source_label(item.source)}  "
+        f"{_linked_title(title, item.url)}  ·  `{item.item_id}`"
     )
     return {"type": "section", "text": {"type": "mrkdwn", "text": line}}
 
 
+def _linked_title(title: str, url: str | None) -> str:
+    """Return a hyperlinked title in Slack mrkdwn, or plain text.
+
+    No bold: Slack's link color gives the title enough visual weight
+    without making the whole line shout. When no URL is available we
+    return plain text — the line stays readable, it just doesn't
+    click.
+    """
+    if not url:
+        return title
+    # Escape the angle-brackets inside the title to avoid breaking the
+    # Slack link syntax. Pipe characters in titles do occur (rarely)
+    # and would split the text from the URL; replace with a look-alike.
+    safe = (
+        title.replace("<", "\u2039")  # SINGLE LEFT-POINTING ANGLE QUOTATION MARK
+        .replace(">", "\u203a")  # SINGLE RIGHT-POINTING ANGLE QUOTATION MARK
+        .replace("|", "\u2758")  # LIGHT VERTICAL BAR
+    )
+    return f"<{url}|{safe}>"
+
+
+def _header_block(text: str) -> dict[str, Any]:
+    """Slack ``header`` block — bigger + bolder than ``section`` text.
+
+    Plain-text only (no mrkdwn), 150-char cap. Unicode emoji render
+    fine, but shortcodes need ``emoji: true``.
+    """
+    # Headers truncate at 150 chars; clamp defensively so a runaway
+    # title in the header-text formatter doesn't 400 the payload.
+    return {
+        "type": "header",
+        "text": {"type": "plain_text", "text": text[:150], "emoji": True},
+    }
+
+
 def _cost_and_correction_footer(stats: DigestStats, config: NotifierConfig) -> list[dict[str, Any]]:
-    """Shared tail: correction block → cost/accuracy line → CLI pointer."""
-    correction_text = (
-        f"✏️  *Correct a classification* · replace `<id>`, `<cat>`, and `<n>`\n"
+    """Shared tail: correction header + code block → cost/accuracy footer."""
+    correction_body = (
+        f"Replace `<id>`, `<cat>`, and `<n>`:\n"
         f"```\n"
         f"{config.sv_command} label --project {config.project} "
         f"--item-id <id> --category <cat> --urgency <n>\n"
@@ -387,7 +469,8 @@ def _cost_and_correction_footer(stats: DigestStats, config: NotifierConfig) -> l
 
     return [
         {"type": "divider"},
-        {"type": "section", "text": {"type": "mrkdwn", "text": correction_text}},
+        _header_block("✏️ Correct a classification"),
+        {"type": "section", "text": {"type": "mrkdwn", "text": correction_body}},
         {"type": "divider"},
         {"type": "section", "text": {"type": "mrkdwn", "text": cost_text}},
     ]

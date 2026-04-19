@@ -212,7 +212,7 @@ def test_digest_top_n_caps_category_and_shows_overflow_hint() -> None:
     # Header line reflects total count + "showing top N".
     assert "active_practitioner" in text
     assert f"{len(items)} items" in text
-    assert f"showing top {TOP_N_PER_CATEGORY}" in text
+    assert f"top {TOP_N_PER_CATEGORY} by urgency" in text
     # Top-urgency item present, lowest-urgency item not.
     assert "active item 0" in text  # urgency 10
     assert "active item 7" not in text  # urgency 3, below the top-5 cut
@@ -306,6 +306,214 @@ def test_digest_cost_footer_includes_accuracy_and_cli_pointer() -> None:
     assert "61.5% accuracy" in text
     # Pointer to the category-inspection CLI command.
     assert "sv digest --project opendata --category" in text
+
+
+def test_digest_uses_header_blocks_for_hierarchy() -> None:
+    """Top-level digest header + per-category headers + correction
+    header must all be Block Kit `header` blocks so Slack renders them
+    larger/bolder than the per-item section text."""
+    payload = build_digest(
+        [
+            _item(category="cost_complaint", item_id="x:1", title="A"),
+            _item(category="off_topic", item_id="x:2", title="B", urgency=0),
+        ],
+        DigestStats(
+            day=date(2026, 4, 19),
+            haiku_cost_usd=0.0,
+            x_cost_usd=0.0,
+            total_labeled=0,
+        ),
+        _cfg(),
+    )
+    headers = [b["text"]["text"] for b in payload["blocks"] if b.get("type") == "header"]
+    # Top header first.
+    assert headers[0].startswith("📊 Digest for ")
+    # Per-category headers for both populated categories.
+    assert any("cost_complaint" in h for h in headers)
+    assert any("off_topic" in h for h in headers)
+    # Correction header in the footer.
+    assert any("Correct a classification" in h for h in headers)
+
+
+def test_digest_item_title_is_hyperlinked_to_url() -> None:
+    """Every digest item should be one click from the discussion."""
+    item = _item(
+        item_id="hackernews:42",
+        title="Datadog costs doubled",
+        url="https://news.ycombinator.com/item?id=42",
+        category="cost_complaint",
+    )
+    payload = build_digest(
+        [item],
+        DigestStats(day=date(2026, 4, 19), haiku_cost_usd=0, x_cost_usd=0, total_labeled=0),
+        _cfg(),
+    )
+    text = _all_text(payload["blocks"])
+    # Plain Slack link mrkdwn — no surrounding bold so the line reads
+    # like a news-feed entry rather than a dashboard.
+    assert "<https://news.ycombinator.com/item?id=42|Datadog costs doubled>" in text
+    # And we're not silently re-adding bold wrappers.
+    assert "*<https" not in text
+
+
+def test_digest_item_without_url_falls_back_to_plain_title() -> None:
+    """Items without a URL render as plain text — no stray link syntax
+    and no bold wrapper that would lie about clickability."""
+    item = _item(url=None, title="No link available")
+    payload = build_digest(
+        [item],
+        DigestStats(day=date(2026, 4, 19), haiku_cost_usd=0, x_cost_usd=0, total_labeled=0),
+        _cfg(),
+    )
+    text = _all_text(payload["blocks"])
+    assert "No link available" in text
+    # No Slack link syntax around the title.
+    around = text.split("No link available")[0][-10:] + text.split("No link available")[1][:10]
+    assert "<http" not in around and "<|" not in around
+
+
+def test_digest_item_title_escapes_pipe_and_angle_brackets() -> None:
+    """A pipe in the title would break Slack's <url|text> syntax;
+    angle brackets would too. Both are replaced with look-alikes."""
+    item = _item(
+        title="What's the deal with <script>|pipe?",
+        url="https://example.com/x",
+    )
+    payload = build_digest(
+        [item],
+        DigestStats(day=date(2026, 4, 19), haiku_cost_usd=0, x_cost_usd=0, total_labeled=0),
+        _cfg(),
+    )
+    text = _all_text(payload["blocks"])
+    # Pipe replaced with look-alike; angle brackets too.
+    assert "\u2758" in text  # LIGHT VERTICAL BAR (pipe look-alike)
+    assert "\u2039script\u203a" in text  # angle-quote wrapped
+
+
+def test_digest_items_include_bare_item_id_subtext() -> None:
+    """Every digest item ends in a monospace ``<item_id>`` span.
+
+    Just the id, no ``--item-id`` prefix — the code styling is enough
+    to mark it as "this is the paste target." The flag name is noise
+    when every digest line has the same one.
+    """
+    item = _item(
+        item_id="hackernews:42",
+        category="cost_complaint",
+        urgency=8,
+    )
+    payload = build_digest(
+        [item],
+        DigestStats(day=date(2026, 4, 19), haiku_cost_usd=0, x_cost_usd=0, total_labeled=0),
+        _cfg(),
+    )
+    text = _all_text(payload["blocks"])
+    assert "`hackernews:42`" in text
+    # Per-line subtexts no longer carry the --item-id flag.
+    assert "`--item-id hackernews:42`" not in text
+    # Category / urgency still excluded from per-line subtexts.
+    pre_footer = text.split("Correct a classification")[0]
+    assert "--category cost_complaint" not in pre_footer
+
+
+def test_digest_x_items_allow_up_to_280_chars() -> None:
+    """X posts top out at 280 chars. Truncating at 120 would drop the
+    payload; give X a wider cap."""
+    long_post = "A" * 280
+    item = _item(item_id="x:1", source="x", title=long_post, category="neutral_discussion")
+    payload = build_digest(
+        [item],
+        DigestStats(day=date(2026, 4, 19), haiku_cost_usd=0, x_cost_usd=0, total_labeled=0),
+        _cfg(),
+    )
+    text = _all_text(payload["blocks"])
+    assert "A" * 280 in text
+    # And we don't silently extend the cap — 281 still truncates.
+    too_long = _item(item_id="x:2", source="x", title="B" * 300, category="neutral_discussion")
+    payload2 = build_digest(
+        [too_long],
+        DigestStats(day=date(2026, 4, 19), haiku_cost_usd=0, x_cost_usd=0, total_labeled=0),
+        _cfg(),
+    )
+    text2 = _all_text(payload2["blocks"])
+    assert "B" * 300 not in text2
+    assert "…" in text2
+
+
+def test_digest_items_do_not_include_author() -> None:
+    """Author is dropped from per-item lines (low signal; title +
+    source do the work)."""
+    item = _item(title="some title", author="the-author")
+    payload = build_digest(
+        [item],
+        DigestStats(day=date(2026, 4, 19), haiku_cost_usd=0, x_cost_usd=0, total_labeled=0),
+        _cfg(),
+    )
+    text = _all_text(payload["blocks"])
+    assert "the-author" not in text
+
+
+def test_digest_uses_human_category_labels_when_available() -> None:
+    """When category_labels is populated, section headers and the
+    alerted-earlier block show the human-friendly label, not the
+    snake_case id. The code subtext still uses the id (the CLI accepts
+    only ids)."""
+    cfg = NotifierConfig(
+        project="opendata",
+        sv_command="sv",
+        category_labels={
+            "cost_complaint": "Observability cost complaint",
+            "self_host_intent": "Self-host Prometheus intent",
+        },
+    )
+    items = [
+        _item(item_id="reddit:1", category="cost_complaint", title="a", urgency=7),
+        _item(
+            item_id="reddit:2",
+            category="cost_complaint",
+            title="b",
+            urgency=8,
+            alerted_at=datetime(2026, 4, 19, 9, 0, tzinfo=UTC),
+        ),
+    ]
+    payload = build_digest(
+        items,
+        DigestStats(day=date(2026, 4, 19), haiku_cost_usd=0, x_cost_usd=0, total_labeled=0),
+        cfg,
+    )
+    text = _all_text(payload["blocks"])
+    # Section header uses the label.
+    assert "Observability cost complaint" in text
+    # The snake_case id still appears in the footer's "Categories: ..."
+    # listing (that's where the list of valid ids lives, since users
+    # need to type an id for --category <id>).
+    assert "cost_complaint" in text
+    # But NOT in per-item subtexts — those only carry --item-id now.
+    assert "--category cost_complaint" not in text
+
+
+def test_digest_category_header_singular_vs_plural() -> None:
+    one_item = _item(item_id="x:1", category="cost_complaint")
+    two_items = [
+        _item(item_id="x:2", category="cost_complaint", title="a"),
+        _item(item_id="x:3", category="cost_complaint", title="b"),
+    ]
+    single = _all_text(
+        build_digest(
+            [one_item],
+            DigestStats(day=date(2026, 4, 19), haiku_cost_usd=0, x_cost_usd=0, total_labeled=0),
+            _cfg(),
+        )["blocks"]
+    )
+    plural = _all_text(
+        build_digest(
+            two_items,
+            DigestStats(day=date(2026, 4, 19), haiku_cost_usd=0, x_cost_usd=0, total_labeled=0),
+            _cfg(),
+        )["blocks"]
+    )
+    assert "· 1 item" in single and "· 1 items" not in single
+    assert "· 2 items" in plural
 
 
 def test_digest_correction_footer_lists_all_three_commands() -> None:

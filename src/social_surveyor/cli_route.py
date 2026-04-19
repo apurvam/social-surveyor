@@ -19,7 +19,7 @@ from typing import Any
 
 import typer
 
-from .config import ConfigError, load_routing_config
+from .config import ConfigError, load_categories, load_routing_config
 from .notifier import NotifierConfig
 from .router import (
     RoutingDecision,
@@ -52,7 +52,17 @@ def run_route(
     if not db_path.is_file():
         raise typer.BadParameter(f"no DB at {db_path} yet — run a poll first")
 
-    notifier_cfg = NotifierConfig(project=project, sv_command=sv_command)
+    try:
+        categories = load_categories(project, projects_root=projects_root)
+        category_labels = {c.id: c.label for c in categories.categories}
+    except ConfigError:
+        category_labels = {}
+
+    notifier_cfg = NotifierConfig(
+        project=project,
+        sv_command=sv_command,
+        category_labels=category_labels,
+    )
 
     with Storage(db_path) as db:
         decisions = route_classifications(db, routing_cfg, dry_run=dry_run)

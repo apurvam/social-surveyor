@@ -29,7 +29,7 @@ from typing import Any
 import typer
 
 from .cli_eval import HAIKU_INPUT_USD_PER_MTOK, HAIKU_OUTPUT_USD_PER_MTOK
-from .config import ConfigError, load_routing_config
+from .config import ConfigError, load_categories, load_routing_config
 from .labeling import count_labeled_ids, labels_path
 from .notifier import (
     DigestStats,
@@ -69,7 +69,23 @@ def run_digest(
 
     window_start = since or (datetime.now(UTC) - timedelta(hours=routing_cfg.digest.window_hours))
 
-    notifier_cfg = NotifierConfig(project=project, sv_command=sv_command)
+    # Load category labels from categories.yaml so the digest can
+    # show human-friendly category names ("Observability cost
+    # complaint") instead of snake_case ids.
+    try:
+        categories = load_categories(project, projects_root=projects_root)
+        category_labels = {c.id: c.label for c in categories.categories}
+    except ConfigError:
+        # Categories missing is a different error path (classifier
+        # can't load either); degrade to empty map so the digest
+        # still ships with id-form labels.
+        category_labels = {}
+
+    notifier_cfg = NotifierConfig(
+        project=project,
+        sv_command=sv_command,
+        category_labels=category_labels,
+    )
 
     with Storage(db_path) as db:
         # Category-inspection mode: stdout only, never Slack. Keeps the
