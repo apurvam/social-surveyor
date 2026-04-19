@@ -312,23 +312,68 @@ ties poll/classify/route together with a daily digest cron.
 - **Haiku-tokens cost cap enforcement.** The `cost_caps.daily_haiku_tokens` field is parsed but not yet enforced. Add a pre-classify check in `classifier.py` that sums today's `api_usage` tokens and halts with an infra alert if exceeded. Trivial once needed; deferred until we see a runaway.
 - **`alert_worthy_categories` is already in `routing.yaml`**, closing the hardcoded-in-eval-harness item from Open Questions.
 
-### Session 5 — Deployment and observability
+Session 4 deferred: `deploy.sh` SSM automation, `secrets.resolve_secret` SSM fallback, Haiku token cost cap enforcement. Rolled forward into Session 5a-polish.
 
-**Scope:** EC2 provisioning, systemd template unit, GitHub Actions CI/CD, SSM Parameter Store integration, structured logging, health endpoint.
+### Session 5a — Minimal production deploy
 
-**Acceptance:**
-- `deploy/bootstrap-ec2.sh` provisions a fresh t4g.micro in us-east-1: user, directory structure, systemd units installed, IAM role attached for SSM read
-- t4g.micro on 1-year Savings Plan (~$3.50/mo), 10 GB gp3 EBS, public subnet with no inbound SG rules, SSM Session Manager for access
-- `deploy/social-surveyor@.service` runs the process under a dedicated `social-surveyor` user with `Restart=always`
-- `.github/workflows/deploy.yml` on push to `main`: lints, tests, SSHes to EC2, runs `deploy/deploy.sh` (rsync code, uv sync, systemctl restart all enabled instances)
-- Secrets in SSM at `/social-surveyor/<n>`, read via boto3, cached in-process
-- structlog JSON output to stdout, captured by journald, optionally forwarded to CloudWatch
-- `/health` endpoint on localhost:8080: last successful poll per source per project, DB row counts, last digest send, current daily cost
-- Access `/health` from laptop via SSM port forwarding
-- Infra alerts (poll failures, classification error rate >5%, cost cap hit) go to a separate Slack channel distinct from business alerts
-- README has a "deploy your own" section that works end-to-end for a fresh forker
+**Scope:** narrowed for time-to-first-digest (aspirational 9am Pacific Monday). Get the service running on EC2 with a daily digest firing; defer every polish item that isn't on that critical path.
 
-**Non-goals:** RSS blog sources, author enrichment, multi-region.
+**What ships in 5a:**
+- Pulumi program in `deploy/pulumi/` (Python-based, Pulumi Cloud state backend)
+- `Pulumi.opendata.example.yaml` committed as a template; `Pulumi.opendata.yaml` gitignored
+- Minimal Pulumi program: EC2 instance (t4g.micro, existing VPC/subnet — Claude Code inspects AWS and asks which), IAM role with SSM + SSM Parameter Store read, security group allowing outbound HTTPS, EBS gp3 volume (SQLite data)
+- Bootstrap script `deploy/bootstrap-ec2.sh` — installs uv, creates `social-surveyor` user, sets up directories, installs systemd unit
+- systemd template unit `deploy/social-surveyor@.service` — runs `social-surveyor run --project <instance-name>`
+- Manual secrets seeding via `aws ssm put-parameter` — one-time, documented step
+- Manual first deploy: rsync repo to instance, uv sync, systemctl enable+start — scripted as a short runbook but no `deploy.sh` automation yet
+- Service running; digest cron configured to fire 9am Pacific daily
+
+**Explicitly deferred from 5a** (5a-polish items, not blockers):
+- `deploy.sh` automated rsync deploy
+- `secrets.resolve_secret` SSM integration (5a uses bootstrap-exported env vars as a shortcut)
+- EBS snapshot lifecycle policy
+- Haiku token cost caps enforcement (still deferred from Session 4; carries forward)
+- Pulumi stack config polish for forker-friendliness
+
+**Non-goals** (later sessions, not 5a-polish):
+- GitHub Actions CI/CD (Session 5b)
+- Health endpoint + infra alerts (Session 5c)
+- CloudWatch Logs, custom metrics dashboards, multi-region, auto-scaling
+
+### Session 5a-polish — Complete the deferred items
+
+Short follow-on to 5a, run after the first successful digest fires. ~1 hour.
+
+- `deploy.sh` that rsyncs repo, runs `uv sync`, restarts systemd unit; runnable locally or via SSM
+- `secrets.resolve_secret` with SSM fallback per the Session 4 deferral note
+- EBS snapshot lifecycle policy (weekly) — can be added to Pulumi program or set directly via AWS CLI
+- Haiku token cost cap enforcement: pre-classify check in `classifier.py` that sums today's `api_usage` Haiku tokens, halts + logs if over `routing_cfg.cost_caps.daily_haiku_tokens`
+- `Pulumi.opendata.example.yaml` polish — comments, realistic placeholder values
+
+### Session 5b — CI/CD
+
+Runs after 5a-polish stabilizes. Expected duration: 1-2 hours.
+
+- GitHub Actions workflow on push to `main`
+- Lints, tests, SSH-deploys to EC2 via deploy key stored in GitHub Secrets
+- Rollback story: revert commit, push, auto-deploy
+
+### Session 5c — Monitoring and observability
+
+Added session — explicitly addresses "how do I know this is running and not silently failing?" Original Session 5 bundled this in; pulling out for focus.
+
+- `/health` HTTP endpoint on localhost:8080 (stdlib `http.server`): last poll per source, DB row counts, last digest send, daily cost, start time
+- Infra alerts Slack webhook (separate from business webhook — `#social-monitoring-infra` or similar)
+- Two alert conditions POSTed to infra channel:
+  - Any source not polled in >30 minutes
+  - Classification error rate >5% in the last hour
+- Implemented inside the existing `run` process via APScheduler (no new long-running process)
+- journald retention / rotation settings for the systemd unit
+- README "how to check if it's running" section with SSM port-forward example for hitting `/health`
+
+**Timing:** after a week or so of production use, when real failure modes have surfaced. Premature to build before you know what actually goes wrong.
+
+**Non-goals (across all 5x sessions):** RSS blog sources, author enrichment, multi-region.
 
 ### Session 5.5 — Public/private config split (conditional)
 
@@ -416,7 +461,7 @@ Updated as sessions reveal new decisions. Current open items:
 - **Refresh policy for mutable item metadata.** `upsert_item` is insert-if-new; we never refresh comment counts, scores, issue state, etc. Fine for classification (post content is immutable) but would be nice for digest annotations ("this post now has 230 upvotes, up from 40 when we first saw it"). Revisit in Session 4 or later.
 - **Silent per-source failures.** Our multi-source poll catches exceptions and logs `poll.source.failed`, which covers crashing sources. It does *not* catch silent failures (a source that starts returning `[]` because an upstream API schema changed, or a hang where no timeout fires). Session 5's `/health` endpoint will track "last successful poll per source per project" so staleness alerts catch these; until then, eyeball the per-source row counts periodically.
 - **Category taxonomy stability.** Categories defined in Session 2.75's `categories.yaml` will be used by both the labeler and (in Session 3) the classifier. Renaming or restructuring categories after labeling has started invalidates prior labels. Treat the taxonomy as a decision to be made deliberately early and then held stable; if it must change, there should be a migration step in the change. **Note from Session 3 iteration:** even adding a new category (without renaming existing ones) requires a full relabel pass across all potentially-affected source categories, not just the obvious donor. Label drift across untouched categories will show up as apparent classifier regressions in subsequent evals. See the "Taxonomy changes trigger a full relabel pass" convention.
-- alert_worthy should be a per-category config field, not hardcoded in the eval harness. Currently cost_complaint + self_host_intent + competitor_pain is hardcoded. When active_practitioner was added, we explicitly told the eval harness to exclude it. When the second project (agent-infra) starts, this hardcoding will break immediately. Factor out in the first session that starts agent-infra, or proactively in a small cleanup session.  
+- **Deployment identifiers in git history.** `Pulumi.opendata.example.yaml` is committed as a template with placeholder values; the real `Pulumi.opendata.yaml` with VPC/subnet IDs is gitignored. This is the conservative choice for a public repo. If the project ever moves to private or a multi-deployer model, revisit — committing real values makes forking easier at the cost of revealing infrastructure identifiers.
 
 ---
 
