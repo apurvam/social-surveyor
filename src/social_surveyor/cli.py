@@ -14,6 +14,7 @@ from dotenv import load_dotenv
 
 from . import __version__
 from .cli_classify import run_classify
+from .cli_digest import run_digest
 from .cli_eval import (
     HAIKU_INPUT_USD_PER_MTOK,
     HAIKU_OUTPUT_USD_PER_MTOK,
@@ -21,6 +22,7 @@ from .cli_eval import (
 )
 from .cli_explain import run_explain
 from .cli_label import run_label, run_label_item
+from .cli_route import run_route
 from .cli_setup import run_setup
 from .cli_silence import run_silence
 from .cli_stats import run_stats
@@ -717,6 +719,97 @@ def eval(
             verbose=verbose,
             export_path=export,
             re_score=re_score,
+        )
+    except typer.BadParameter as e:
+        typer.echo(str(e), err=True)
+        raise typer.Exit(code=1) from None
+
+
+@app.command()
+def route(
+    project: Annotated[str, typer.Option("--project", help="Project name.")],
+    dry_run: Annotated[
+        bool,
+        typer.Option(
+            "--dry-run",
+            help="Print decisions; don't write alerts rows or POST to Slack.",
+        ),
+    ] = False,
+) -> None:
+    """Route unrouted classifications and send pending immediate alerts.
+
+    Idempotent: classifications with an existing alerts row are skipped.
+    Failed sends leave sent_at=NULL so the next invocation retries.
+    """
+    _load_or_exit(project)
+    try:
+        run_route(
+            project,
+            _db_path(project),
+            Path("projects"),
+            dry_run=dry_run,
+        )
+    except typer.BadParameter as e:
+        typer.echo(str(e), err=True)
+        raise typer.Exit(code=1) from None
+
+
+@app.command()
+def digest(
+    project: Annotated[str, typer.Option("--project", help="Project name.")],
+    dry_run: Annotated[
+        bool,
+        typer.Option(
+            "--dry-run",
+            help="Print the Block Kit JSON to stdout; don't POST to Slack.",
+        ),
+    ] = False,
+    category: Annotated[
+        str | None,
+        typer.Option(
+            "--category",
+            help=(
+                "Skip Slack; print a full listing of this category to stdout. "
+                "Respects --since and --limit. Pointed at by the main "
+                "digest's overflow hint line."
+            ),
+        ),
+    ] = None,
+    since: Annotated[
+        str | None,
+        typer.Option(
+            "--since",
+            help=(
+                "ISO-8601 date (YYYY-MM-DD). Overrides the configured "
+                "window_hours — useful for retrospective digests."
+            ),
+        ),
+    ] = None,
+    limit: Annotated[
+        int | None,
+        typer.Option("--limit", min=1, help="Cap items when using --category."),
+    ] = None,
+) -> None:
+    """Build and send the daily Slack digest (or inspect a category to stdout)."""
+    _load_or_exit(project)
+
+    since_dt: datetime | None = None
+    if since is not None:
+        try:
+            since_dt = datetime.fromisoformat(since).replace(tzinfo=UTC)
+        except ValueError:
+            typer.echo(f"--since must be ISO-8601 (YYYY-MM-DD), got {since!r}", err=True)
+            raise typer.Exit(code=1) from None
+
+    try:
+        run_digest(
+            project,
+            _db_path(project),
+            Path("projects"),
+            dry_run=dry_run,
+            category=category,
+            since=since_dt,
+            limit=limit,
         )
     except typer.BadParameter as e:
         typer.echo(str(e), err=True)

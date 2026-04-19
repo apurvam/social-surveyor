@@ -17,6 +17,7 @@ dependencies = [
     "httpx>=0.28.1",
     "feedparser>=6.0.12",
     "anthropic>=0.96.0",
+    "apscheduler>=3.11.2",
 ]
 
 [project.scripts]
