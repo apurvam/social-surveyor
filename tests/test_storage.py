@@ -113,3 +113,164 @@ def test_sum_api_usage_respects_since_cutoff(tmp_path: Path) -> None:
         # Everything was recorded "now"; a future cutoff sees nothing.
         future = datetime.now(UTC) + timedelta(hours=1)
         assert db.sum_api_usage("x", future) == 0
+
+
+# --- classifications -----------------------------------------------------
+
+
+def _save_classification(db: Storage, **overrides: object) -> None:
+    defaults: dict[str, object] = {
+        "item_id": "hackernews:41234567",
+        "category": "cost_complaint",
+        "urgency": 8,
+        "reasoning": "explicit dollar amount",
+        "prompt_version": "v1",
+        "model": "claude-haiku-4-5-20251001",
+        "input_tokens": 1200,
+        "output_tokens": 80,
+        "classified_at": datetime(2026, 4, 18, 10, 0, tzinfo=UTC),
+        "raw_response": {"content": [{"text": "..."}], "stop_reason": "end_turn"},
+    }
+    defaults.update(overrides)
+    db.save_classification(**defaults)  # type: ignore[arg-type]
+
+
+def test_save_and_get_classification(tmp_path: Path) -> None:
+    with Storage(tmp_path / "t.db") as db:
+        _save_classification(db)
+        c = db.get_classification("hackernews:41234567", "v1")
+        assert c is not None
+        assert c["category"] == "cost_complaint"
+        assert c["urgency"] == 8
+        assert c["input_tokens"] == 1200
+        # raw_response round-trips as a dict, not a JSON string.
+        assert isinstance(c["raw_response"], dict)
+        assert c["raw_response"]["stop_reason"] == "end_turn"
+        # classified_at decodes to a datetime with tzinfo.
+        assert isinstance(c["classified_at"], datetime)
+
+
+def test_get_classification_returns_latest_by_classified_at(tmp_path: Path) -> None:
+    # Re-classifying the same item under the same prompt_version writes
+    # a new row; readers want the newest.
+    with Storage(tmp_path / "t.db") as db:
+        old = datetime(2026, 4, 17, 9, 0, tzinfo=UTC)
+        new = datetime(2026, 4, 18, 9, 0, tzinfo=UTC)
+        _save_classification(db, classified_at=old, urgency=3, reasoning="first take")
+        _save_classification(db, classified_at=new, urgency=9, reasoning="second take")
+        c = db.get_classification("hackernews:41234567", "v1")
+        assert c is not None
+        assert c["urgency"] == 9
+        assert c["reasoning"] == "second take"
+
+
+def test_get_classification_returns_none_when_missing(tmp_path: Path) -> None:
+    with Storage(tmp_path / "t.db") as db:
+        assert db.get_classification("does:not_exist", "v1") is None
+
+
+def test_list_classifications_returns_all_versions_newest_first(tmp_path: Path) -> None:
+    with Storage(tmp_path / "t.db") as db:
+        _save_classification(
+            db,
+            prompt_version="v1",
+            classified_at=datetime(2026, 4, 17, tzinfo=UTC),
+        )
+        _save_classification(
+            db,
+            prompt_version="v2",
+            classified_at=datetime(2026, 4, 18, tzinfo=UTC),
+        )
+        rows = db.list_classifications("hackernews:41234567")
+        assert [r["prompt_version"] for r in rows] == ["v2", "v1"]
+
+
+def test_count_classifications_filters(tmp_path: Path) -> None:
+    with Storage(tmp_path / "t.db") as db:
+        _save_classification(db, item_id="a:1", prompt_version="v1", category="cost_complaint")
+        _save_classification(db, item_id="a:2", prompt_version="v1", category="off_topic")
+        _save_classification(db, item_id="a:3", prompt_version="v2", category="cost_complaint")
+        assert db.count_classifications() == 3
+        assert db.count_classifications(prompt_version="v1") == 2
+        assert db.count_classifications(category="cost_complaint") == 2
+        assert db.count_classifications(prompt_version="v1", category="cost_complaint") == 1
+
+
+def test_get_unclassified_items_excludes_classified_for_that_version(tmp_path: Path) -> None:
+    with Storage(tmp_path / "t.db") as db:
+        db.upsert_item(_item("a"))
+        db.upsert_item(_item("b"))
+        _save_classification(db, item_id="reddit:a", prompt_version="v1")
+        # 'b' has no classification; 'a' has one under v1 only.
+        v1_unclassified = db.get_unclassified_items("v1")
+        assert [f"{r['source']}:{r['platform_id']}" for r in v1_unclassified] == ["reddit:b"]
+        # Under v2, both items are still unclassified.
+        v2_unclassified = db.get_unclassified_items("v2")
+        assert {f"{r['source']}:{r['platform_id']}" for r in v2_unclassified} == {
+            "reddit:a",
+            "reddit:b",
+        }
+
+
+def test_get_unclassified_items_honors_limit(tmp_path: Path) -> None:
+    with Storage(tmp_path / "t.db") as db:
+        for i in range(5):
+            db.upsert_item(_item(f"id{i}"))
+        assert len(db.get_unclassified_items("v1", limit=2)) == 2
+
+
+def test_record_api_usage_accepts_token_counts(tmp_path: Path) -> None:
+    with Storage(tmp_path / "t.db") as db:
+        db.record_api_usage("anthropic", "v1", 1, input_tokens=1200, output_tokens=80)
+        start = datetime.now(UTC).replace(hour=0, minute=0, second=0, microsecond=0)
+        # items_fetched still totals as before.
+        assert db.sum_api_usage("anthropic", start) == 1
+        # Token totals are reported separately.
+        assert db.sum_api_tokens("anthropic", start) == (1200, 80)
+
+
+def test_sum_api_tokens_treats_null_as_zero(tmp_path: Path) -> None:
+    with Storage(tmp_path / "t.db") as db:
+        # A non-LLM source (X) leaves token columns NULL.
+        db.record_api_usage("x", "q1", 100)
+        start = datetime.now(UTC).replace(hour=0, minute=0, second=0, microsecond=0)
+        assert db.sum_api_tokens("x", start) == (0, 0)
+
+
+def test_migration_adds_token_columns_to_pre_session3_db(tmp_path: Path) -> None:
+    # Simulate a DB created before Session 3: api_usage exists without
+    # input_tokens/output_tokens columns. Opening it with the current
+    # Storage should add them transparently without breaking existing
+    # rows.
+    import sqlite3
+
+    db_path = tmp_path / "legacy.db"
+    with sqlite3.connect(db_path) as raw:
+        raw.execute(
+            """
+            CREATE TABLE api_usage (
+                id            INTEGER PRIMARY KEY AUTOINCREMENT,
+                source        TEXT NOT NULL,
+                query_name    TEXT NOT NULL,
+                items_fetched INTEGER NOT NULL,
+                fetched_at    TEXT NOT NULL
+            )
+            """
+        )
+        raw.execute(
+            "INSERT INTO api_usage (source, query_name, items_fetched, fetched_at) "
+            "VALUES (?, ?, ?, ?)",
+            ("x", "q1", 50, datetime(2026, 4, 1, tzinfo=UTC).isoformat()),
+        )
+        raw.commit()
+
+    # Opening migrates.
+    with Storage(db_path) as db:
+        cols = {r["name"] for r in db._conn.execute("PRAGMA table_info(api_usage)").fetchall()}
+        assert "input_tokens" in cols
+        assert "output_tokens" in cols
+        # Pre-migration rows keep items_fetched and get NULL token counts;
+        # sum_api_tokens treats NULL as 0.
+        start = datetime(2026, 3, 1, tzinfo=UTC)
+        assert db.sum_api_usage("x", start) == 50
+        assert db.sum_api_tokens("x", start) == (0, 0)

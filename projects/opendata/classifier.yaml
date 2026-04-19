@@ -1,0 +1,74 @@
+# Classifier configuration for the opendata-timeseries monitoring project.
+# See projects/example/classifier.yaml for field-by-field documentation.
+
+version: 1
+prompt_version: "v2"
+
+categories_file: "categories.yaml"
+
+icp_description: |
+  The user sells opendata-timeseries, a Prometheus-compatible TSDB built
+  natively on object storage (MIT-licensed). The target audience is
+  engineering leaders and senior ICs at companies spending $100k+/year on
+  observability vendors (Datadog, New Relic, Grafana Cloud) who are
+  considering self-hosting to cut costs but balk at the operational
+  complexity of existing solutions (Mimir, Thanos, Cortex).
+
+# Structural decision rules. Bumped to v2 to address v1's dominant
+# failure modes (16 off_topic items mislabeled as neutral_discussion,
+# systematic over-promotion to the alert-worthy categories). Urgency
+# rules intentionally deferred to v3 after we see the category signal
+# stabilize here.
+additional_instructions: |
+  Classification rules (apply in order):
+
+  1. First, decide if the post is about the observability / monitoring /
+     metrics-storage space at all.
+     - If the post is about a different space (crypto, frontend, databases
+       unrelated to observability, job postings for unrelated roles) and
+       only matched on an incidental keyword, classify as off_topic.
+     - A post that lists "Prometheus" or "Datadog" as a skill or tag
+       without discussing observability itself is off_topic.
+     - BUT: a short post that IS about observability still counts as
+       in-scope. "Anyone else sick of Datadog pricing?" is in-scope with
+       no caveats even though it's brief.
+
+  2. If the post IS about the observability space but shows no specific
+     pain, no active evaluation, and no buying signal, classify as
+     neutral_discussion. General opinion, news, or casual conversation
+     belongs here.
+
+  3. Only use the alert-worthy categories (cost_complaint,
+     self_host_intent, competitor_pain) when there is a clear, specific
+     signal. The bar is "this is an engagement opportunity a vendor would
+     want to see," not "this topic came up."
+     - cost_complaint: author expresses a specific personal complaint
+       about observability vendor cost. "Our Datadog bill went from $30k
+       to $80k" passes. "Datadog is known to be expensive" does not.
+     - self_host_intent: author is actively asking about, planning, or
+       currently evaluating running their own Prometheus-compatible
+       storage. Questions ("how do you handle long-term retention?"),
+       evaluations ("we're comparing Mimir vs VictoriaMetrics"), and
+       plans ("we're moving off Datadog next quarter") all qualify.
+       A third-party architecture recap with no first-person stake is
+       tutorial_or_marketing.
+     - competitor_pain: author is experiencing operational pain with
+       Mimir, Thanos, Cortex, or VictoriaMetrics. Casual mentions are
+       not competitor_pain.
+
+  4. When torn between an alert-worthy category and neutral_discussion,
+     choose neutral_discussion. When torn between neutral_discussion and
+     off_topic, re-check rule 1.
+
+  (No rule 5 — urgency calibration intentionally deferred to v3 after
+  category gains stabilize. Score urgency using the scale above without
+  second-guessing.)
+
+few_shot_examples: []
+
+model: "claude-haiku-4-5-20251001"
+max_tokens: 500
+temperature: 0.0
+
+max_retries: 1
+backoff_seconds: 2.0

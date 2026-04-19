@@ -144,6 +144,72 @@ class CategoryConfig(BaseModel):
     urgency_scale: list[UrgencyBand] = Field(..., min_length=1)
 
 
+class FewShotExample(BaseModel):
+    """One worked example fed to the classifier to pin down a category.
+
+    ``expected_category`` must match a category id from the project's
+    categories.yaml; the cross-file check lives in
+    :func:`load_classifier_config` because a pydantic model can only see
+    its own YAML.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    title: str = Field(..., min_length=1)
+    body: str = Field(..., min_length=1)
+    expected_category: str = Field(..., min_length=1)
+    expected_urgency: int = Field(..., ge=0, le=10)
+    note: str = Field(default="")
+
+
+class ClassifierConfig(BaseModel):
+    """Per-project classifier configuration.
+
+    Extends (never redefines) the taxonomy in ``categories.yaml`` — the
+    ``categories_file`` field names the taxonomy file this classifier
+    binds to, so renaming ``categories.yaml`` or splitting into
+    private/public later stays a one-field change.
+
+    ``prompt_version`` is the single most load-bearing field: it's
+    stamped on every classification so the eval harness can A/B v1 vs
+    v2 without re-classifying items. Bump it whenever a prompt-affecting
+    field changes.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    version: int = Field(default=1, ge=1)
+    prompt_version: str = Field(..., min_length=1)
+    categories_file: str = Field(
+        default="categories.yaml",
+        description="Path (relative to the project dir) of the taxonomy this "
+        "classifier binds to. Must exist and parse as a CategoryConfig.",
+    )
+    icp_description: str = Field(
+        ...,
+        min_length=1,
+        description="Free-text ICP context inlined into the system prompt.",
+    )
+    additional_instructions: str = Field(
+        default="",
+        description=(
+            "Optional decision-rules block emitted in the system prompt "
+            "between the urgency scale and few-shot examples. Use for "
+            "prompt-version-specific heuristics (e.g. 'when in doubt "
+            "between alert-worthy and neutral, prefer neutral'). Bump "
+            "prompt_version when the content changes."
+        ),
+    )
+    few_shot_examples: list[FewShotExample] = Field(default_factory=list)
+    model: str = Field(..., min_length=1)
+    max_tokens: int = Field(..., ge=1, le=8192)
+    temperature: float = Field(..., ge=0.0, le=2.0)
+    # Retries on transient API failures only (network errors, 5xx).
+    # Malformed-JSON responses get one free re-prompt independently.
+    max_retries: int = Field(default=1, ge=0, le=5)
+    backoff_seconds: float = Field(default=2.0, ge=0.0)
+
+
 class ProjectConfig(BaseModel):
     """Aggregated config for a single project.
 
@@ -245,3 +311,67 @@ def load_categories(
         return CategoryConfig.model_validate(data)
     except ValidationError as e:
         raise ConfigError(_format_validation_error(path, e)) from e
+
+
+def load_classifier_config(
+    project: str,
+    projects_root: Path | str = "projects",
+) -> ClassifierConfig:
+    """Load the per-project classifier configuration.
+
+    Parses ``projects/<project>/classifier.yaml`` into a
+    :class:`ClassifierConfig`, then resolves ``categories_file`` and
+    verifies every ``few_shot_examples.expected_category`` references a
+    category id that actually exists in the taxonomy. Cross-file
+    validation intentionally lives here and not on the pydantic model,
+    since a model only sees its own YAML.
+
+    Raises :class:`ConfigError` with a human-readable message if the
+    file is missing, fails schema validation, the referenced taxonomy
+    is missing or invalid, or any example references an unknown
+    category.
+    """
+    root = Path(projects_root)
+    project_dir = root / project
+    path = project_dir / "classifier.yaml"
+    if not path.is_file():
+        raise ConfigError(
+            f"project '{project}' has no classifier.yaml at {path}; "
+            f"copy projects/example/classifier.yaml as a starting point"
+        )
+    data = _load_yaml(path)
+    try:
+        cfg = ClassifierConfig.model_validate(data)
+    except ValidationError as e:
+        raise ConfigError(_format_validation_error(path, e)) from e
+
+    categories_path = project_dir / cfg.categories_file
+    if not categories_path.is_file():
+        raise ConfigError(
+            f"{path}: categories_file={cfg.categories_file!r} resolves to "
+            f"{categories_path} which does not exist"
+        )
+    cats_data = _load_yaml(categories_path)
+    try:
+        cats = CategoryConfig.model_validate(cats_data)
+    except ValidationError as e:
+        raise ConfigError(_format_validation_error(categories_path, e)) from e
+
+    valid_ids = {c.id for c in cats.categories}
+    bad = [
+        (i, ex.expected_category)
+        for i, ex in enumerate(cfg.few_shot_examples)
+        if ex.expected_category not in valid_ids
+    ]
+    if bad:
+        valid_display = ", ".join(sorted(valid_ids))
+        lines = [f"{path}: invalid few_shot_examples"]
+        for i, cat in bad:
+            lines.append(
+                f"  - few_shot_examples.{i}.expected_category: "
+                f"{cat!r} is not a category id in {cfg.categories_file} "
+                f"(valid: {valid_display})"
+            )
+        raise ConfigError("\n".join(lines))
+
+    return cfg

@@ -51,6 +51,29 @@ SCHEMA_STATEMENTS: tuple[str, ...] = (
     )
     """,
     "CREATE INDEX IF NOT EXISTS idx_api_usage_source_fetched ON api_usage(source, fetched_at)",
+    # Session 3: Haiku classifications. Multiple rows per item are
+    # allowed (different prompt versions, or re-classifications under
+    # the same version). The authoritative row for a
+    # (item_id, prompt_version) pair is the one with the latest
+    # classified_at.
+    """
+    CREATE TABLE IF NOT EXISTS classifications (
+        id              INTEGER PRIMARY KEY AUTOINCREMENT,
+        item_id         TEXT    NOT NULL,
+        category        TEXT    NOT NULL,
+        urgency         INTEGER NOT NULL,
+        reasoning       TEXT,
+        prompt_version  TEXT    NOT NULL,
+        model           TEXT    NOT NULL,
+        input_tokens    INTEGER,
+        output_tokens   INTEGER,
+        classified_at   TEXT    NOT NULL,
+        raw_response    TEXT
+    )
+    """,
+    "CREATE INDEX IF NOT EXISTS idx_classifications_item_id ON classifications(item_id)",
+    "CREATE INDEX IF NOT EXISTS idx_classifications_prompt_version "
+    "ON classifications(prompt_version)",
 )
 
 
@@ -93,6 +116,30 @@ class Storage:
         with self._conn:
             for stmt in SCHEMA_STATEMENTS:
                 self._conn.execute(stmt)
+            self._apply_migrations()
+
+    def _apply_migrations(self) -> None:
+        """Additive schema changes needed for databases created by older sessions.
+
+        Session 3 added ``input_tokens`` / ``output_tokens`` to
+        ``api_usage`` for Anthropic cost tracking. Fresh DBs get these
+        columns from the CREATE above by virtue of a later ADD; existing
+        opendata.db instances get them via the ALTER below. Other
+        sources leave these columns NULL.
+
+        Not a migration framework — PLAN.md explicitly defers that. This
+        is the narrow "add a nullable column, don't touch anything
+        else" pattern called out as safe.
+        """
+        self._maybe_add_column("api_usage", "input_tokens", "INTEGER")
+        self._maybe_add_column("api_usage", "output_tokens", "INTEGER")
+
+    def _maybe_add_column(self, table: str, column: str, ddl: str) -> None:
+        existing = {
+            row["name"] for row in self._conn.execute(f"PRAGMA table_info({table})").fetchall()
+        }
+        if column not in existing:
+            self._conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {ddl}")
 
     def close(self) -> None:
         self._conn.close()
@@ -191,14 +238,33 @@ class Storage:
 
     # --- api usage -------------------------------------------------------
 
-    def record_api_usage(self, source: str, query_name: str, items_fetched: int) -> None:
+    def record_api_usage(
+        self,
+        source: str,
+        query_name: str,
+        items_fetched: int,
+        *,
+        input_tokens: int | None = None,
+        output_tokens: int | None = None,
+    ) -> None:
+        """Log one API call. Token columns stay NULL for non-LLM sources."""
         with self._conn:
             self._conn.execute(
                 """
-                INSERT INTO api_usage (source, query_name, items_fetched, fetched_at)
-                VALUES (?, ?, ?, ?)
+                INSERT INTO api_usage (
+                    source, query_name, items_fetched, fetched_at,
+                    input_tokens, output_tokens
+                )
+                VALUES (?, ?, ?, ?, ?, ?)
                 """,
-                (source, query_name, items_fetched, _to_iso(datetime.now(UTC))),
+                (
+                    source,
+                    query_name,
+                    items_fetched,
+                    _to_iso(datetime.now(UTC)),
+                    input_tokens,
+                    output_tokens,
+                ),
             )
 
     def sum_api_usage(self, source: str, since: datetime) -> int:
@@ -330,6 +396,155 @@ class Storage:
         ).fetchall()
         return {r["query_name"]: int(r["total"]) for r in rows}
 
+    def sum_api_tokens(
+        self,
+        source: str,
+        since: datetime,
+    ) -> tuple[int, int]:
+        """Return (input_tokens, output_tokens) totals since ``since``.
+
+        Rows with NULL token columns (non-LLM calls, or pre-Session-3
+        rows) contribute 0. Used by the ``usage --source anthropic`` CLI
+        to report classification spend.
+        """
+        row = self._conn.execute(
+            """
+            SELECT
+                COALESCE(SUM(input_tokens), 0)  AS in_total,
+                COALESCE(SUM(output_tokens), 0) AS out_total
+            FROM api_usage
+            WHERE source = ? AND fetched_at >= ?
+            """,
+            (source, _to_iso(since)),
+        ).fetchone()
+        return int(row["in_total"]), int(row["out_total"])
+
+    # --- classifications -------------------------------------------------
+
+    def save_classification(
+        self,
+        *,
+        item_id: str,
+        category: str,
+        urgency: int,
+        reasoning: str,
+        prompt_version: str,
+        model: str,
+        input_tokens: int,
+        output_tokens: int,
+        classified_at: datetime,
+        raw_response: dict[str, Any],
+    ) -> None:
+        with self._conn:
+            self._conn.execute(
+                """
+                INSERT INTO classifications (
+                    item_id, category, urgency, reasoning,
+                    prompt_version, model,
+                    input_tokens, output_tokens,
+                    classified_at, raw_response
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    item_id,
+                    category,
+                    urgency,
+                    reasoning,
+                    prompt_version,
+                    model,
+                    input_tokens,
+                    output_tokens,
+                    _to_iso(classified_at),
+                    json.dumps(raw_response, default=str),
+                ),
+            )
+
+    def get_classification(
+        self,
+        item_id: str,
+        prompt_version: str,
+    ) -> dict[str, Any] | None:
+        """Latest classification for ``(item_id, prompt_version)``.
+
+        Multiple rows are allowed per pair (re-classifications); this
+        returns the most recent by ``classified_at``.
+        """
+        row = self._conn.execute(
+            """
+            SELECT * FROM classifications
+            WHERE item_id = ? AND prompt_version = ?
+            ORDER BY classified_at DESC, id DESC
+            LIMIT 1
+            """,
+            (item_id, prompt_version),
+        ).fetchone()
+        if row is None:
+            return None
+        return self._classification_row_to_dict(row)
+
+    def list_classifications(self, item_id: str) -> list[dict[str, Any]]:
+        """Every classification for ``item_id``, newest first.
+
+        Used by the ``explain`` command to show prompt-version history.
+        """
+        rows = self._conn.execute(
+            """
+            SELECT * FROM classifications
+            WHERE item_id = ?
+            ORDER BY classified_at DESC, id DESC
+            """,
+            (item_id,),
+        ).fetchall()
+        return [self._classification_row_to_dict(r) for r in rows]
+
+    def count_classifications(
+        self,
+        *,
+        prompt_version: str | None = None,
+        category: str | None = None,
+    ) -> int:
+        where: list[str] = []
+        params: list[Any] = []
+        if prompt_version is not None:
+            where.append("prompt_version = ?")
+            params.append(prompt_version)
+        if category is not None:
+            where.append("category = ?")
+            params.append(category)
+        clause = f"WHERE {' AND '.join(where)}" if where else ""
+        row = self._conn.execute(
+            f"SELECT COUNT(*) AS c FROM classifications {clause}",
+            tuple(params),
+        ).fetchone()
+        return int(row["c"])
+
+    def get_unclassified_items(
+        self,
+        prompt_version: str,
+        *,
+        limit: int | None = None,
+    ) -> list[dict[str, Any]]:
+        """Items that have no classification under ``prompt_version``.
+
+        Ordered oldest-first on purpose: in backfill/classify mode we
+        want deterministic progress from the tail, not a re-shuffle
+        every time new items arrive.
+        """
+        sql = """
+            SELECT i.* FROM items i
+            WHERE (i.source || ':' || i.platform_id) NOT IN (
+                SELECT item_id FROM classifications WHERE prompt_version = ?
+            )
+            ORDER BY i.created_at ASC, i.id ASC
+        """
+        params: tuple[Any, ...] = (prompt_version,)
+        if limit is not None:
+            sql += " LIMIT ?"
+            params = (prompt_version, limit)
+        rows = self._conn.execute(sql, params).fetchall()
+        return [self._row_to_dict(r) for r in rows]
+
     # --- helpers ---------------------------------------------------------
 
     @staticmethod
@@ -341,4 +556,13 @@ class Storage:
             d["created_at"] = _from_iso(d["created_at"])
         if d.get("fetched_at") is not None:
             d["fetched_at"] = _from_iso(d["fetched_at"])
+        return d
+
+    @staticmethod
+    def _classification_row_to_dict(row: sqlite3.Row) -> dict[str, Any]:
+        d = dict(row)
+        if d.get("raw_response"):
+            d["raw_response"] = json.loads(d["raw_response"])
+        if d.get("classified_at") is not None:
+            d["classified_at"] = _from_iso(d["classified_at"])
         return d

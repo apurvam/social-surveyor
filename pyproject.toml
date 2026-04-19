@@ -16,6 +16,7 @@ dependencies = [
     "tenacity>=8.2.3",
     "httpx>=0.28.1",
     "feedparser>=6.0.12",
+    "anthropic>=0.96.0",
 ]
 
 [project.scripts]
