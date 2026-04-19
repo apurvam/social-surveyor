@@ -27,7 +27,7 @@ from .cli_setup import run_setup
 from .cli_silence import run_silence
 from .cli_stats import run_stats
 from .cli_triage import run_triage
-from .config import ConfigError, ProjectConfig, load_project_config
+from .config import ConfigError, ProjectConfig, load_project_config, load_routing_config
 from .log_config import configure_logging
 from .sources.base import Source, SourceInitError
 from .sources.github import GitHubSource
@@ -147,6 +147,51 @@ def _print_json(data: object) -> None:
     typer.echo(json.dumps(data, default=str))
 
 
+def run_poll(
+    *,
+    project: str,
+    projects_root: Path = Path("projects"),
+    source: str | None = None,
+) -> None:
+    """Poll configured sources for ``project``.
+
+    Extracted from the ``poll`` CLI command so the scheduler can call
+    the same function without going through typer. A failure in one
+    source (e.g. GitHub rate limit) is logged but doesn't stop the
+    remaining sources.
+    """
+    try:
+        cfg = load_project_config(project, projects_root=projects_root)
+    except ConfigError as e:
+        raise typer.BadParameter(str(e)) from None
+    names = _select_source_names(cfg, source)
+
+    real_db = Storage(_db_path(project))
+    try:
+        for name in names:
+            src = _build_source(name, cfg, real_db)
+            try:
+                items = src.fetch()
+            except Exception as exc:
+                log.exception(
+                    "poll.source.failed",
+                    project=project,
+                    source=src.name,
+                    error=repr(exc),
+                )
+                continue
+            new = sum(1 for i in items if real_db.upsert_item(i))
+            log.info(
+                "poll.done",
+                project=project,
+                source=src.name,
+                fetched=len(items),
+                new=new,
+            )
+    finally:
+        real_db.close()
+
+
 @app.command()
 def poll(
     project: Annotated[str, typer.Option("--project", help="Project name.")],
@@ -178,30 +223,7 @@ def poll(
         _run_dry_run(cfg, names, project=project)
         return
 
-    real_db = Storage(_db_path(project))
-    try:
-        for name in names:
-            src = _build_source(name, cfg, real_db)
-            try:
-                items = src.fetch()
-            except Exception as exc:
-                log.exception(
-                    "poll.source.failed",
-                    project=project,
-                    source=src.name,
-                    error=repr(exc),
-                )
-                continue
-            new = sum(1 for i in items if real_db.upsert_item(i))
-            log.info(
-                "poll.done",
-                project=project,
-                source=src.name,
-                fetched=len(items),
-                new=new,
-            )
-    finally:
-        real_db.close()
+    run_poll(project=project, source=source)
 
 
 def _run_dry_run(cfg: ProjectConfig, names: list[str], *, project: str) -> None:
@@ -723,6 +745,94 @@ def eval(
     except typer.BadParameter as e:
         typer.echo(str(e), err=True)
         raise typer.Exit(code=1) from None
+
+
+@app.command()
+def run(
+    project: Annotated[str, typer.Option("--project", help="Project name.")],
+    poll_interval_minutes: Annotated[
+        int,
+        typer.Option("--poll-interval-minutes", min=1, help="How often to poll sources."),
+    ] = 10,
+    classify_interval_minutes: Annotated[
+        int,
+        typer.Option(
+            "--classify-interval-minutes",
+            min=1,
+            help="How often to classify unclassified items.",
+        ),
+    ] = 10,
+    route_interval_minutes: Annotated[
+        int,
+        typer.Option(
+            "--route-interval-minutes",
+            min=1,
+            help="How often to route classifications and post immediate alerts.",
+        ),
+    ] = 10,
+) -> None:
+    """Start the long-running pipeline: poll / classify / route / digest.
+
+    Blocking foreground process. In production, systemd wraps this
+    (Session 5). Locally, Ctrl-C stops it cleanly.
+    """
+    from .scheduler import build_scheduler
+
+    _load_or_exit(project)
+    try:
+        routing_cfg = load_routing_config(project)
+    except ConfigError as e:
+        typer.echo(str(e), err=True)
+        raise typer.Exit(code=2) from None
+
+    db_path = _db_path(project)
+    projects_root = Path("projects")
+
+    # Bind context into zero-arg callables so the scheduler stays a
+    # thin wiring layer.
+    def _poll_job() -> None:
+        run_poll(project=project, projects_root=projects_root)
+
+    def _classify_job() -> None:
+        run_classify(
+            project,
+            db_path,
+            projects_root,
+            item_id=None,
+            limit=None,
+            prompt_version_override=None,
+            dry_run=False,
+        )
+
+    def _route_job() -> None:
+        run_route(project, db_path, projects_root, dry_run=False)
+
+    def _digest_job() -> None:
+        run_digest(project, db_path, projects_root, dry_run=False)
+
+    sched = build_scheduler(
+        project,
+        routing_cfg=routing_cfg,
+        poll_fn=_poll_job,
+        classify_fn=_classify_job,
+        route_fn=_route_job,
+        digest_fn=_digest_job,
+        poll_interval_minutes=poll_interval_minutes,
+        classify_interval_minutes=classify_interval_minutes,
+        route_interval_minutes=route_interval_minutes,
+    )
+
+    typer.echo(
+        f"social-surveyor running for project {project!r} "
+        f"(poll/classify/route every {poll_interval_minutes}m, "
+        f"digest at {routing_cfg.digest.schedule.hour:02d}:"
+        f"{routing_cfg.digest.schedule.minute:02d} "
+        f"{routing_cfg.digest.schedule.timezone}). Ctrl-C to stop."
+    )
+    try:
+        sched.start()
+    except (KeyboardInterrupt, SystemExit):
+        typer.echo("\nstopped.")
 
 
 @app.command()
