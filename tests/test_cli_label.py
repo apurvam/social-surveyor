@@ -147,41 +147,6 @@ def test_label_resume_skips_already_labeled(tmp_path: Path) -> None:
     assert result["total"] == 2
 
 
-def test_label_back_step_removes_last_line_and_resurfaces_item(tmp_path: Path) -> None:
-    root, db_path = _seed(tmp_path, n_items=2)
-
-    script = _Script(
-        [
-            "1",  # item 1: category
-            "5",  # urgency
-            "",  # no note
-            "b",  # go back
-            # Item 1 is re-presented
-            "2",  # different category this time
-            "9",
-            "new note",
-            "q",
-        ]
-    )
-
-    run_label(
-        "demo",
-        db_path,
-        root,
-        source=None,
-        randomize=False,
-        input_fn=script.input,
-        echo_fn=script.echo,
-    )
-
-    labels_file = root / "demo" / "evals" / "labeled.jsonl"
-    entries = iter_label_entries(labels_file)
-    assert len(entries) == 1  # only the re-labeled version
-    assert entries[0].category == "self_host_intent"
-    assert entries[0].urgency == 9
-    assert entries[0].note == "new note"
-
-
 def test_label_rejects_bad_urgency_and_reprompts(tmp_path: Path) -> None:
     root, db_path = _seed(tmp_path, n_items=1)
     script = _Script(

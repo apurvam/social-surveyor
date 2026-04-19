@@ -19,8 +19,10 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError
 class LabelEntry(BaseModel):
     """One decision recorded by the labeler.
 
-    Latest entry for a given ``item_id`` is authoritative — the back-step
-    command literally truncates the last line.
+    Labels are append-only. When multiple entries exist for the same
+    ``item_id``, the one with the latest ``labeled_at`` is authoritative;
+    earlier entries are retained in the file for audit but do not
+    affect eval scoring. See :func:`resolve_effective_labels`.
     """
 
     model_config = ConfigDict(extra="forbid")
@@ -72,13 +74,41 @@ def iter_label_entries(path: Path) -> list[LabelEntry]:
     return out
 
 
+def resolve_effective_labels(entries: list[LabelEntry]) -> dict[str, LabelEntry]:
+    """Collapse an append-only label list to its latest-wins view.
+
+    Groups by ``item_id`` and returns the entry with the maximum
+    ``labeled_at`` per group. Earlier entries are discarded from the
+    returned dict but remain in the underlying file (the raw list
+    passed in is not mutated).
+
+    This is the canonical helper for anyone asking "what is the
+    current ground truth for this item?" — used by the eval harness,
+    the label walkthrough queue builder, and the reconsider / disagreement
+    queue builders.
+    """
+    latest: dict[str, LabelEntry] = {}
+    for e in entries:
+        prior = latest.get(e.item_id)
+        if prior is None or e.labeled_at > prior.labeled_at:
+            latest[e.item_id] = e
+    return latest
+
+
 def labeled_ids(path: Path) -> set[str]:
-    """Return the set of ``item_id``s for which at least one label exists."""
-    return {e.item_id for e in iter_label_entries(path)}
+    """Return the set of ``item_id``s for which at least one label exists.
+
+    Identical by construction to ``resolve_effective_labels(...).keys()``
+    — the latest-wins collapse preserves the set of labeled ids, it
+    just picks one canonical entry per id. Going through
+    :func:`resolve_effective_labels` keeps the "one source of truth"
+    invariant visible.
+    """
+    return set(resolve_effective_labels(iter_label_entries(path)).keys())
 
 
 def count_labeled_ids(path: Path) -> int:
-    """Count unique ``item_id``s (not lines — a back-step+redo creates two lines)."""
+    """Count unique ``item_id``s (not lines — corrections append rather than overwrite)."""
     return len(labeled_ids(path))
 
 
@@ -88,31 +118,6 @@ def append_label(path: Path, entry: LabelEntry) -> None:
     with path.open("a", encoding="utf-8") as f:
         # Use model_dump_json for consistent ordering & date formatting.
         f.write(entry.model_dump_json() + "\n")
-
-
-def pop_last_label(path: Path) -> LabelEntry | None:
-    """Remove and return the last entry. No-op on empty/missing file.
-
-    Powers the labeler's one-step `b`ack command: the operator reverts
-    the most recent decision and is re-presented that item.
-    """
-    if not path.exists():
-        return None
-    lines = path.read_text(encoding="utf-8").splitlines(keepends=True)
-    # Trim any trailing blank lines; we only want to pop real entries.
-    while lines and not lines[-1].strip():
-        lines.pop()
-    if not lines:
-        return None
-    last = lines.pop()
-    try:
-        entry = LabelEntry.model_validate_json(last.rstrip())
-    except (ValidationError, json.JSONDecodeError):
-        # Corrupt last line — still remove it so the operator isn't stuck.
-        path.write_text("".join(lines), encoding="utf-8")
-        return None
-    path.write_text("".join(lines), encoding="utf-8")
-    return entry
 
 
 def make_entry(

@@ -22,13 +22,12 @@ from .labeling import (
     iter_label_entries,
     labeled_ids,
     make_entry,
-    pop_last_label,
+    resolve_effective_labels,
 )
 from .storage import Storage
 
 # Keep the quit commands together so a reader can find them.
 _QUIT = "q"
-_BACK = "b"
 _SKIP = "s"
 
 
@@ -56,8 +55,6 @@ class _Session:
         self.skipped = 0
         self.labeled = 0
         self._start = time.monotonic()
-        # Stack of item_ids we've shown; supports a one-step `b`ack.
-        self._last_shown: tuple[str, str] | None = None
 
 
 def _build_queue(
@@ -99,12 +96,7 @@ def _build_reconsider_queue(
     been relabeled before; the user sees the current effective label
     and can append a new one (or keep).
     """
-    entries = iter_label_entries(labels_file)
-    latest_by_id: dict[str, LabelEntry] = {}
-    for e in entries:
-        prior = latest_by_id.get(e.item_id)
-        if prior is None or e.labeled_at > prior.labeled_at:
-            latest_by_id[e.item_id] = e
+    latest_by_id = resolve_effective_labels(iter_label_entries(labels_file))
 
     queue: list[tuple[str, str, LabelEntry]] = []
     for item_id, label in latest_by_id.items():
@@ -143,12 +135,7 @@ def _build_disagreement_queue(
     labeler touches in this loop appends a new entry that wins next
     time.
     """
-    entries = iter_label_entries(labels_file)
-    latest_by_id: dict[str, LabelEntry] = {}
-    for e in entries:
-        prior = latest_by_id.get(e.item_id)
-        if prior is None or e.labeled_at > prior.labeled_at:
-            latest_by_id[e.item_id] = e
+    latest_by_id = resolve_effective_labels(iter_label_entries(labels_file))
 
     queue: list[tuple[str, str]] = []
     for item_id, label in latest_by_id.items():
@@ -375,24 +362,13 @@ def run_label(
                     echo_fn,
                 )
             echo_fn(_render_item(item, cfg, session.index + 1, session.total))
-            raw_cat = input_fn("Category (number or id, s=skip, b=back, q=quit): ").strip()
+            raw_cat = input_fn("Category (number or id, s=skip, q=quit): ").strip()
 
             if raw_cat == _QUIT:
                 break
             if raw_cat == _SKIP:
                 session.skipped += 1
                 session.index += 1
-                session._last_shown = (src, platform_id)
-                continue
-            if raw_cat == _BACK:
-                popped = pop_last_label(labels_file)
-                if popped is None:
-                    echo_fn("nothing to undo.")
-                    continue
-                # Drop into the previous item's slot.
-                session.labeled = max(0, session.labeled - 1)
-                session.index = max(0, session.index - 1)
-                echo_fn(f"reverted: {popped.item_id}")
                 continue
 
             cat_id = _resolve_category(raw_cat, cfg)
@@ -415,7 +391,6 @@ def run_label(
             append_label(labels_file, entry)
             session.labeled += 1
             session.index += 1
-            session._last_shown = (src, platform_id)
             echo_fn(_progress_line(session))
 
     return {

@@ -46,7 +46,12 @@ from .eval_metrics import (
     stabilization_check,
     stop_criteria,
 )
-from .labeling import LabelEntry, iter_label_entries, labels_path
+from .labeling import (
+    LabelEntry,
+    iter_label_entries,
+    labels_path,
+    resolve_effective_labels,
+)
 from .storage import Storage
 
 log = structlog.get_logger("cli.eval")
@@ -493,17 +498,11 @@ def _load_effective_labels(path: Path) -> list[LabelEntry]:
     """Apply latest-wins per item_id.
 
     Matches PLAN.md's "append-only labeled.jsonl with timestamp
-    precedence" semantics. Duplicate item_ids are collapsed by picking
-    the entry with the latest ``labeled_at``; earlier entries are
-    retained in the file for audit but ignored by the eval harness.
+    precedence" semantics. Delegates to :func:`resolve_effective_labels`;
+    this wrapper exists to keep the call site's intent ("load the eval
+    input set") readable.
     """
-    entries = iter_label_entries(path)
-    latest: dict[str, LabelEntry] = {}
-    for e in entries:
-        prior = latest.get(e.item_id)
-        if prior is None or e.labeled_at > prior.labeled_at:
-            latest[e.item_id] = e
-    return list(latest.values())
+    return list(resolve_effective_labels(iter_label_entries(path)).values())
 
 
 def _apply_version_override(

@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
@@ -15,17 +15,22 @@ from social_surveyor.labeling import (
     labeled_ids,
     labels_path,
     make_entry,
-    pop_last_label,
+    resolve_effective_labels,
 )
 
 
-def _entry(item_id: str = "hackernews:123", category: str = "cost_complaint") -> LabelEntry:
+def _entry(
+    item_id: str = "hackernews:123",
+    category: str = "cost_complaint",
+    urgency: int = 7,
+    labeled_at: datetime | None = None,
+) -> LabelEntry:
     return LabelEntry(
         item_id=item_id,
         category=category,
-        urgency=7,
+        urgency=urgency,
         note=None,
-        labeled_at=datetime.now(UTC),
+        labeled_at=labeled_at or datetime.now(UTC),
     )
 
 
@@ -65,35 +70,69 @@ def test_labeled_ids_returns_unique_items(tmp_path: Path) -> None:
     assert count_labeled_ids(path) == 2
 
 
-def test_pop_last_label_truncates_last_line(tmp_path: Path) -> None:
+def test_resolve_effective_labels_latest_wins_two_entries(tmp_path: Path) -> None:
+    """A second label for the same item_id with a later timestamp wins;
+    the raw file retains both entries for audit."""
     path = ensure_labels_file("demo", projects_root=tmp_path)
-    append_label(path, _entry("a:1"))
-    append_label(path, _entry("a:2"))
-    append_label(path, _entry("a:3"))
+    t0 = datetime(2026, 1, 1, 12, 0, tzinfo=UTC)
+    original = _entry("hackernews:1", category="cost_complaint", urgency=8, labeled_at=t0)
+    correction = _entry(
+        "hackernews:1",
+        category="off_topic",
+        urgency=1,
+        labeled_at=t0 + timedelta(hours=1),
+    )
+    append_label(path, original)
+    append_label(path, correction)
 
-    popped = pop_last_label(path)
-    assert popped is not None
-    assert popped.item_id == "a:3"
-
-    remaining = iter_label_entries(path)
-    assert [e.item_id for e in remaining] == ["a:1", "a:2"]
-
-
-def test_pop_last_label_noop_on_missing_file(tmp_path: Path) -> None:
-    assert pop_last_label(tmp_path / "nope.jsonl") is None
+    # Raw file has both.
+    raw = iter_label_entries(path)
+    assert len(raw) == 2
+    # Effective view collapses to latest.
+    effective = resolve_effective_labels(raw)
+    assert set(effective.keys()) == {"hackernews:1"}
+    assert effective["hackernews:1"].category == "off_topic"
+    assert effective["hackernews:1"].urgency == 1
 
 
-def test_pop_last_label_removes_corrupt_trailing_line(tmp_path: Path) -> None:
+def test_resolve_effective_labels_latest_wins_three_entries(tmp_path: Path) -> None:
+    """Three labels at distinct timestamps — the latest is authoritative
+    regardless of file order."""
     path = ensure_labels_file("demo", projects_root=tmp_path)
-    append_label(path, _entry("a:1"))
-    # Simulate partial write / corruption on the last line.
-    with path.open("a") as f:
-        f.write("not-json-at-all\n")
+    t0 = datetime(2026, 1, 1, tzinfo=UTC)
+    first = _entry("x:42", category="neutral_discussion", urgency=2, labeled_at=t0)
+    middle = _entry(
+        "x:42",
+        category="cost_complaint",
+        urgency=7,
+        labeled_at=t0 + timedelta(days=1),
+    )
+    last = _entry(
+        "x:42",
+        category="self_host_intent",
+        urgency=6,
+        labeled_at=t0 + timedelta(days=2),
+    )
+    # Append in non-chronological order to confirm the resolver relies
+    # on labeled_at, not file position.
+    append_label(path, middle)
+    append_label(path, first)
+    append_label(path, last)
 
-    popped = pop_last_label(path)
-    assert popped is None  # corrupt line returned as "no valid pop"
-    # But the corrupt line is gone, so the operator isn't stuck.
-    assert [e.item_id for e in iter_label_entries(path)] == ["a:1"]
+    effective = resolve_effective_labels(iter_label_entries(path))
+    assert effective["x:42"].category == "self_host_intent"
+    assert effective["x:42"].urgency == 6
+    # And the raw file still has all three.
+    assert len(iter_label_entries(path)) == 3
+
+
+def test_resolve_effective_labels_handles_empty_and_single(tmp_path: Path) -> None:
+    path = ensure_labels_file("demo", projects_root=tmp_path)
+    assert resolve_effective_labels(iter_label_entries(path)) == {}
+
+    append_label(path, _entry("a:1"))
+    effective = resolve_effective_labels(iter_label_entries(path))
+    assert list(effective.keys()) == ["a:1"]
 
 
 def test_iter_label_entries_raises_on_malformed(tmp_path: Path) -> None:
