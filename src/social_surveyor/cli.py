@@ -22,6 +22,7 @@ from .cli_eval import (
 from .cli_explain import run_explain
 from .cli_label import run_label, run_label_item
 from .cli_setup import run_setup
+from .cli_silence import run_silence
 from .cli_stats import run_stats
 from .cli_triage import run_triage
 from .config import ConfigError, ProjectConfig, load_project_config
@@ -582,6 +583,35 @@ def label(
             f"\ndone — labeled={result['labeled']} skipped={result['skipped']} "
             f"remaining={result['remaining']}"
         )
+
+
+@app.command()
+def silence(
+    project: Annotated[str, typer.Option("--project", help="Project name.")],
+    item_id: Annotated[
+        str,
+        typer.Option(
+            "--item-id",
+            help="Canonical id ({source}:{platform_id}) of the item to silence.",
+        ),
+    ],
+) -> None:
+    """Stop alerting on a specific item.
+
+    Silence is non-teaching: it filters the router but does not update
+    labeled.jsonl. Use `label --item-id` instead when the classifier's
+    judgment was wrong.
+
+    Silencing is permanent. To reverse a silence, run:
+
+        sqlite3 data/<project>.db "DELETE FROM silenced_items WHERE item_id='<id>'"
+    """
+    _load_or_exit(project)
+    try:
+        run_silence(project, _db_path(project), item_id=item_id)
+    except typer.BadParameter as e:
+        typer.echo(str(e), err=True)
+        raise typer.Exit(code=1) from None
 
 
 @app.command()

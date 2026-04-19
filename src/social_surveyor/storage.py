@@ -74,6 +74,17 @@ SCHEMA_STATEMENTS: tuple[str, ...] = (
     "CREATE INDEX IF NOT EXISTS idx_classifications_item_id ON classifications(item_id)",
     "CREATE INDEX IF NOT EXISTS idx_classifications_prompt_version "
     "ON classifications(prompt_version)",
+    # Session 4: user-marked "stop alerting me about this item." Distinct
+    # from label corrections — silencing does NOT teach the classifier.
+    # Keyed on item_id because the silence persists across prompt-version
+    # re-classifications; a new classification under v4 for an item the
+    # user silenced under v3 is still silenced.
+    """
+    CREATE TABLE IF NOT EXISTS silenced_items (
+        item_id     TEXT PRIMARY KEY,
+        silenced_at TEXT NOT NULL
+    )
+    """,
 )
 
 
@@ -544,6 +555,47 @@ class Storage:
             params = (prompt_version, limit)
         rows = self._conn.execute(sql, params).fetchall()
         return [self._row_to_dict(r) for r in rows]
+
+    # --- silenced items --------------------------------------------------
+
+    def silence_item(self, item_id: str) -> bool:
+        """Silence ``item_id``. Idempotent.
+
+        Returns True when the row is newly inserted, False when the item
+        was already silenced. Callers use the return for user messaging
+        ("silenced" vs "was already silenced") — the underlying DB
+        state is the same either way.
+        """
+        with self._conn:
+            cur = self._conn.execute(
+                """
+                INSERT INTO silenced_items (item_id, silenced_at)
+                VALUES (?, ?)
+                ON CONFLICT(item_id) DO NOTHING
+                """,
+                (item_id, _to_iso(datetime.now(UTC))),
+            )
+            return cur.rowcount == 1
+
+    def is_silenced(self, item_id: str) -> bool:
+        row = self._conn.execute(
+            "SELECT 1 FROM silenced_items WHERE item_id = ? LIMIT 1",
+            (item_id,),
+        ).fetchone()
+        return row is not None
+
+    def silenced_since(self, since: datetime) -> set[str]:
+        """Item IDs silenced on or after ``since``.
+
+        Used by the digest to render the 🔕 marker against items
+        silenced within the digest window — older silences are hidden
+        entirely (see Session 4 design notes).
+        """
+        rows = self._conn.execute(
+            "SELECT item_id FROM silenced_items WHERE silenced_at >= ?",
+            (_to_iso(since),),
+        ).fetchall()
+        return {r["item_id"] for r in rows}
 
     # --- helpers ---------------------------------------------------------
 

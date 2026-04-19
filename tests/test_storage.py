@@ -274,3 +274,36 @@ def test_migration_adds_token_columns_to_pre_session3_db(tmp_path: Path) -> None
         start = datetime(2026, 3, 1, tzinfo=UTC)
         assert db.sum_api_usage("x", start) == 50
         assert db.sum_api_tokens("x", start) == (0, 0)
+
+
+def test_silence_item_is_idempotent(tmp_path: Path) -> None:
+    with Storage(tmp_path / "t.db") as db:
+        assert db.silence_item("hackernews:1") is True
+        assert db.silence_item("hackernews:1") is False  # second call is no-op
+        assert db.is_silenced("hackernews:1") is True
+        assert db.is_silenced("hackernews:does-not-exist") is False
+
+
+def test_silenced_since_filters_by_window(tmp_path: Path) -> None:
+    """silenced_since returns only items whose silenced_at is on/after the cutoff.
+
+    Used by the digest to render the 🔕 marker inside the 24h window
+    without accreting older silences forever.
+    """
+    import sqlite3
+
+    db_path = tmp_path / "t.db"
+    with Storage(db_path) as db:
+        db.silence_item("x:1")
+        db.silence_item("x:2")
+        # Rewrite one row's timestamp to a week ago so the window excludes it.
+        week_ago = datetime.now(UTC) - timedelta(days=7)
+        with sqlite3.connect(db_path) as raw:
+            raw.execute(
+                "UPDATE silenced_items SET silenced_at = ? WHERE item_id = ?",
+                (week_ago.isoformat(), "x:1"),
+            )
+            raw.commit()
+
+        cutoff = datetime.now(UTC) - timedelta(days=1)
+        assert db.silenced_since(cutoff) == {"x:2"}
