@@ -12,21 +12,25 @@ categories:
   - id: cost_complaint
     label: "Observability cost complaint"
     description: >
-      Author expresses specific pain about the cost of their observability
-      vendor (Datadog, New Relic, Grafana Cloud). Requires a personal pain
-      signal, not just pricing commentary.
+      Author expresses a specific, first-person complaint about the cost
+      of their observability vendor (Datadog, New Relic, Grafana Cloud).
+      Requires a first-person pain signal, not general industry
+      commentary about vendor pricing.
   - id: self_host_intent
     label: "Self-host Prometheus intent"
     description: >
-      Author is actively evaluating or asking how to run their own
-      Prometheus-compatible storage. Describing someone else's architecture
-      or the landscape in general does not qualify.
+      Author is shopping for, asking how to set up, or actively
+      evaluating a self-hosted Prometheus-compatible storage solution.
+      The distinguishing signal is that they don't have a solution yet
+      — already-running practitioners reflecting on past choices are
+      active_practitioner, not self_host_intent.
   - id: competitor_pain
     label: "Competitor operational pain"
     description: >
-      Author is experiencing operational pain with Mimir, Thanos, Cortex,
-      or VictoriaMetrics. Passing mentions and feature discussion do not
-      qualify.
+      Author is experiencing first-person operational pain with Mimir,
+      Thanos, Cortex, or VictoriaMetrics. Landscape commentary about
+      these tools' complexity, passing mentions, and feature discussion
+      do not qualify.
   - id: active_practitioner
     label: "Active observability practitioner"
     description: >
@@ -44,8 +48,10 @@ categories:
     label: "Neutral topic discussion"
     description: >
       IS about the observability / Prometheus / metrics-storage space,
-      but shows no specific pain point, buying signal, or active
-      evaluation. General opinion, news, or casual conversation.
+      but shows no practitioner depth (that would be active_practitioner),
+      no specific pain (that would be cost_complaint or competitor_pain),
+      and no active shopping (that would be self_host_intent). General
+      opinion, landscape commentary, news, or casual conversation.
   - id: tutorial_or_marketing
     label: "Tutorial or vendor marketing"
     description: >
