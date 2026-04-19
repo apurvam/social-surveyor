@@ -2,7 +2,9 @@
 
 Reads `categories.yaml`, walks unlabeled items newest-first, and
 appends one JSONL line per decision to `projects/<n>/evals/labeled.jsonl`.
-Crash-safe (per-decision append), resume-default, one-step back.
+Crash-safe (per-decision append), resume-default. Corrections land via
+`label --item-id <id>` rather than a back-step — append-only with
+latest-wins means you never destructively rewrite a prior label.
 """
 
 from __future__ import annotations
@@ -34,9 +36,8 @@ _SKIP = "s"
 class _Session:
     """Mutable per-run state for the label loop.
 
-    Tracks progress counters + the last item shown (for `b`ack).
-    Kept as a class so tests can drive :meth:`process_one` directly
-    without going through Typer's prompt machinery.
+    Tracks progress counters. Kept as a class so tests can drive the
+    loop directly without going through Typer's prompt machinery.
     """
 
     def __init__(
@@ -575,4 +576,144 @@ def _prompt_urgency(input_fn, echo_fn) -> int | None:
     return None
 
 
-__all__ = ["LabelEntry", "run_label"]
+def run_label_item(
+    project: str,
+    db_path: Path,
+    projects_root: Path,
+    *,
+    item_id: str,
+    category: str | None,
+    urgency: int | None,
+    note: str | None,
+    input_fn: Any = input,
+    echo_fn: Any = typer.echo,
+) -> LabelEntry:
+    """Label a single item by canonical ``item_id``, bypassing the walkthrough.
+
+    Two paths:
+
+    - **Fully specified** (``category`` and ``urgency`` both given): non-
+      interactive. Validate and append. Used from Slack copy-paste
+      commands where the operator already decided what the label should be.
+    - **Partial / none given**: interactive. Prompt for whatever is
+      missing, mirroring the walkthrough's prompt shapes so muscle
+      memory carries over. If the item already has an effective label,
+      show it first and ask whether to replace; a `n`/`N`/empty reply
+      exits without appending.
+
+    Validation is front-loaded: missing DB row, unknown category, and
+    urgency-out-of-range all fail with ``typer.BadParameter`` so the
+    CLI can convert to a clean exit-1. Reason: this command is expected
+    to run inside tight copy-paste loops from Slack — silent failures
+    there would mean "I thought I corrected it" while the eval set
+    stays stale.
+    """
+    cfg = load_categories(project, projects_root=projects_root)
+    labels_file = ensure_labels_file(project, projects_root=projects_root)
+
+    if not db_path.is_file():
+        raise typer.BadParameter(f"no DB at {db_path} yet — run a poll first")
+
+    src, _, platform_id = item_id.partition(":")
+    if not src or not platform_id:
+        raise typer.BadParameter(
+            f"item_id {item_id!r} is not canonical ({{source}}:{{platform_id}})"
+        )
+
+    if category is not None:
+        resolved = _resolve_category(category, cfg)
+        if resolved is None:
+            valid = ", ".join(c.id for c in cfg.categories)
+            raise typer.BadParameter(f"unknown category {category!r}; valid: {valid}")
+        category = resolved
+
+    if urgency is not None and not (0 <= urgency <= 10):
+        raise typer.BadParameter(f"urgency must be in 0..10, got {urgency}")
+
+    with Storage(db_path) as db:
+        item = db.get_item_by_id(src, platform_id)
+        if item is None:
+            raise typer.BadParameter(
+                f"no item with id {item_id!r} in {db_path} — "
+                "did you mean a different project, or need to poll first?"
+            )
+
+        existing = resolve_effective_labels(iter_label_entries(labels_file)).get(item_id)
+
+        # Non-interactive fast path: everything specified, nothing to ask.
+        if category is not None and urgency is not None:
+            entry = make_entry(
+                item_id=item_id,
+                category=category,
+                urgency=urgency,
+                note=note,
+            )
+            append_label(labels_file, entry)
+            if existing is not None:
+                echo_fn(
+                    f"relabeled {item_id}: "
+                    f"{existing.category} u={existing.urgency} → "
+                    f"{entry.category} u={entry.urgency}"
+                )
+            else:
+                echo_fn(f"labeled {item_id}: {entry.category} u={entry.urgency}")
+            return entry
+
+        # Interactive path: confirm replace if already labeled, then prompt
+        # for whatever the caller didn't pass in.
+        echo_fn(_render_item(item, cfg, index=1, total=1))
+        if existing is not None:
+            echo_fn(
+                f"Current label: {existing.category}  urgency={existing.urgency}  "
+                f"labeled_at={existing.labeled_at.isoformat()}"
+            )
+            if existing.note:
+                echo_fn(f"  note: {existing.note}")
+            raw = input_fn("Replace with new label? [y/N]: ").strip().lower()
+            if raw not in {"y", "yes"}:
+                echo_fn("keeping current label; no changes written.")
+                # Sentinel return: callers don't need the entry, only the CLI
+                # echoes whether anything changed. Raising here would turn
+                # a benign "I changed my mind" into an error exit.
+                return existing
+
+        if category is None:
+            while True:
+                raw_cat = input_fn("Category (number or id, q=quit): ").strip()
+                if raw_cat == _QUIT:
+                    raise typer.Exit(code=0)
+                resolved = _resolve_category(raw_cat, cfg)
+                if resolved is not None:
+                    category = resolved
+                    break
+                echo_fn("unknown category; try again")
+
+        if urgency is None:
+            echo_fn(_render_urgency_scale(cfg))
+            prompted = _prompt_urgency(input_fn, echo_fn)
+            if prompted is None:
+                raise typer.Exit(code=0)
+            urgency = prompted
+
+        if note is None:
+            note = input_fn("Note (optional, empty to skip): ").strip() or None
+
+        entry = make_entry(
+            item_id=item_id,
+            category=category,
+            urgency=urgency,
+            note=note,
+        )
+        append_label(labels_file, entry)
+        if existing is not None:
+            echo_fn(
+                f"relabeled {item_id}: "
+                f"{existing.category} u={existing.urgency} → "
+                f"{entry.category} u={entry.urgency}"
+            )
+        else:
+            echo_fn(f"labeled {item_id}: {entry.category} u={entry.urgency}")
+        return entry
+
+
+__all__ = ["LabelEntry", "run_label", "run_label_item"]

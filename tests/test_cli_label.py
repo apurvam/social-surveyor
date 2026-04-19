@@ -3,7 +3,10 @@ from __future__ import annotations
 from datetime import UTC, datetime
 from pathlib import Path
 
-from social_surveyor.cli_label import _resolve_category, run_label
+import pytest
+import typer
+
+from social_surveyor.cli_label import _resolve_category, run_label, run_label_item
 from social_surveyor.config import CategoryConfig, load_categories
 from social_surveyor.labeling import (
     append_label,
@@ -409,6 +412,216 @@ def test_label_reconsider_and_disagreements_are_mutually_exclusive(tmp_path: Pat
             reconsider=True,
             disagreements_for_version="v1",
             input_fn=lambda _prompt="": "q",
+            echo_fn=lambda _m="": None,
+        )
+
+
+def test_run_label_item_non_interactive_appends(tmp_path: Path) -> None:
+    root, db_path = _seed(tmp_path, n_items=1)
+
+    script = _Script([])  # no prompts expected
+    entry = run_label_item(
+        "demo",
+        db_path,
+        root,
+        item_id="hackernews:100",
+        category="cost_complaint",
+        urgency=8,
+        note="prices",
+        input_fn=script.input,
+        echo_fn=script.echo,
+    )
+    assert entry.category == "cost_complaint"
+    assert entry.urgency == 8
+
+    labels_file = root / "demo" / "evals" / "labeled.jsonl"
+    entries = iter_label_entries(labels_file)
+    assert len(entries) == 1
+    assert entries[0].note == "prices"
+
+
+def test_run_label_item_non_interactive_accepts_category_number(tmp_path: Path) -> None:
+    """--category accepts the id OR the 1-based index, same as the walkthrough."""
+    root, db_path = _seed(tmp_path, n_items=1)
+    run_label_item(
+        "demo",
+        db_path,
+        root,
+        item_id="hackernews:100",
+        category="2",  # second cat in CATEGORIES_YAML = self_host_intent
+        urgency=5,
+        note=None,
+        input_fn=lambda _p="": "",
+        echo_fn=lambda _m="": None,
+    )
+    labels_file = root / "demo" / "evals" / "labeled.jsonl"
+    entries = iter_label_entries(labels_file)
+    assert entries[0].category == "self_host_intent"
+
+
+def test_run_label_item_interactive_prompts_when_fields_missing(tmp_path: Path) -> None:
+    root, db_path = _seed(tmp_path, n_items=1)
+
+    # --item-id only: interactive for category + urgency + note.
+    script = _Script(["cost_complaint", "8", "typed note"])
+    run_label_item(
+        "demo",
+        db_path,
+        root,
+        item_id="hackernews:100",
+        category=None,
+        urgency=None,
+        note=None,
+        input_fn=script.input,
+        echo_fn=script.echo,
+    )
+    labels_file = root / "demo" / "evals" / "labeled.jsonl"
+    entries = iter_label_entries(labels_file)
+    assert entries[0].category == "cost_complaint"
+    assert entries[0].urgency == 8
+    assert entries[0].note == "typed note"
+
+
+def test_run_label_item_interactive_confirms_before_replacing(tmp_path: Path) -> None:
+    root, db_path = _seed(tmp_path, n_items=1)
+    labels_file = ensure_labels_file("demo", projects_root=root)
+    append_label(
+        labels_file,
+        make_entry(item_id="hackernews:100", category="off_topic", urgency=1, note=None),
+    )
+
+    # User answers "n" to replace prompt → no append.
+    before = labels_file.read_text(encoding="utf-8")
+    script = _Script(["n"])
+    run_label_item(
+        "demo",
+        db_path,
+        root,
+        item_id="hackernews:100",
+        category=None,
+        urgency=None,
+        note=None,
+        input_fn=script.input,
+        echo_fn=script.echo,
+    )
+    assert labels_file.read_text(encoding="utf-8") == before
+
+
+def test_run_label_item_interactive_replaces_on_yes(tmp_path: Path) -> None:
+    root, db_path = _seed(tmp_path, n_items=1)
+    labels_file = ensure_labels_file("demo", projects_root=root)
+    append_label(
+        labels_file,
+        make_entry(item_id="hackernews:100", category="off_topic", urgency=1, note=None),
+    )
+
+    # y, then category, urgency, note.
+    script = _Script(["y", "cost_complaint", "9", ""])
+    run_label_item(
+        "demo",
+        db_path,
+        root,
+        item_id="hackernews:100",
+        category=None,
+        urgency=None,
+        note=None,
+        input_fn=script.input,
+        echo_fn=script.echo,
+    )
+    entries = iter_label_entries(labels_file)
+    assert len(entries) == 2  # append-only: original + correction
+    latest = max(entries, key=lambda e: e.labeled_at)
+    assert latest.category == "cost_complaint"
+    assert latest.urgency == 9
+
+
+def test_run_label_item_non_interactive_replaces_without_prompting(tmp_path: Path) -> None:
+    """Fully-specified non-interactive runs don't ask to confirm replace —
+    the operator already made the decision."""
+    root, db_path = _seed(tmp_path, n_items=1)
+    labels_file = ensure_labels_file("demo", projects_root=root)
+    append_label(
+        labels_file,
+        make_entry(item_id="hackernews:100", category="off_topic", urgency=1, note=None),
+    )
+    script = _Script([])  # would raise if anything prompts
+    run_label_item(
+        "demo",
+        db_path,
+        root,
+        item_id="hackernews:100",
+        category="cost_complaint",
+        urgency=9,
+        note=None,
+        input_fn=script.input,
+        echo_fn=script.echo,
+    )
+    entries = iter_label_entries(labels_file)
+    assert len(entries) == 2
+    latest = max(entries, key=lambda e: e.labeled_at)
+    assert latest.category == "cost_complaint"
+
+
+def test_run_label_item_rejects_unknown_item_id(tmp_path: Path) -> None:
+    root, db_path = _seed(tmp_path, n_items=1)
+    with pytest.raises(typer.BadParameter, match="no item with id"):
+        run_label_item(
+            "demo",
+            db_path,
+            root,
+            item_id="hackernews:does-not-exist",
+            category="cost_complaint",
+            urgency=5,
+            note=None,
+            input_fn=lambda _p="": "",
+            echo_fn=lambda _m="": None,
+        )
+
+
+def test_run_label_item_rejects_unknown_category(tmp_path: Path) -> None:
+    root, db_path = _seed(tmp_path, n_items=1)
+    with pytest.raises(typer.BadParameter, match="unknown category"):
+        run_label_item(
+            "demo",
+            db_path,
+            root,
+            item_id="hackernews:100",
+            category="banana_split",
+            urgency=5,
+            note=None,
+            input_fn=lambda _p="": "",
+            echo_fn=lambda _m="": None,
+        )
+
+
+def test_run_label_item_rejects_non_canonical_item_id(tmp_path: Path) -> None:
+    root, db_path = _seed(tmp_path, n_items=1)
+    with pytest.raises(typer.BadParameter, match="not canonical"):
+        run_label_item(
+            "demo",
+            db_path,
+            root,
+            item_id="no-colon-here",
+            category="cost_complaint",
+            urgency=5,
+            note=None,
+            input_fn=lambda _p="": "",
+            echo_fn=lambda _m="": None,
+        )
+
+
+def test_run_label_item_rejects_urgency_out_of_range(tmp_path: Path) -> None:
+    root, db_path = _seed(tmp_path, n_items=1)
+    with pytest.raises(typer.BadParameter, match=r"urgency must be in 0\.\.10"):
+        run_label_item(
+            "demo",
+            db_path,
+            root,
+            item_id="hackernews:100",
+            category="cost_complaint",
+            urgency=11,
+            note=None,
+            input_fn=lambda _p="": "",
             echo_fn=lambda _m="": None,
         )
 

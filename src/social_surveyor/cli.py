@@ -20,7 +20,7 @@ from .cli_eval import (
     run_eval,
 )
 from .cli_explain import run_explain
-from .cli_label import run_label
+from .cli_label import run_label, run_label_item
 from .cli_setup import run_setup
 from .cli_stats import run_stats
 from .cli_triage import run_triage
@@ -434,11 +434,15 @@ def label(
             ),
         ),
     ] = False,
-    reconsider_category: Annotated[
+    category: Annotated[
         str | None,
         typer.Option(
             "--category",
-            help="Filter --reconsider queue to items currently labeled as this category.",
+            help=(
+                "With --item-id, set the label category non-interactively. "
+                "With --reconsider, filter the queue to items currently "
+                "labeled as this category. Invalid without either."
+            ),
         ),
     ] = None,
     urgency_min: Annotated[
@@ -459,13 +463,76 @@ def label(
             help="Filter --reconsider queue to items whose current urgency is <= this.",
         ),
     ] = None,
+    item_id: Annotated[
+        str | None,
+        typer.Option(
+            "--item-id",
+            help=(
+                "Label one specific item by canonical id ({source}:{platform_id}). "
+                "Interactive unless --category and --urgency are also given."
+            ),
+        ),
+    ] = None,
+    label_urgency: Annotated[
+        int | None,
+        typer.Option(
+            "--urgency",
+            min=0,
+            max=10,
+            help="With --item-id, set the urgency (0-10) non-interactively.",
+        ),
+    ] = None,
+    label_note: Annotated[
+        str | None,
+        typer.Option(
+            "--note",
+            help="With --item-id, attach an optional note.",
+        ),
+    ] = None,
 ) -> None:
     """Walk through unlabeled items and record category + urgency + optional note.
 
     Labels append to projects/<project>/evals/labeled.jsonl per decision
-    so Ctrl-C loses at most one label. `b` undoes the most recent label.
+    so Ctrl-C loses at most one label. Use --item-id to label a specific
+    item (e.g. from a Slack alert's copy-paste line); a relabel appends
+    a new entry rather than overwriting, and the latest entry wins.
     """
+    # --urgency / --note only make sense alongside --item-id. --category
+    # is overloaded: it's either the target label (with --item-id) or
+    # the reconsider-queue filter (with --reconsider). Reject ambiguous
+    # combinations up-front rather than letting the wrong mode eat it.
+    if item_id is None:
+        if label_urgency is not None:
+            raise typer.BadParameter("--urgency requires --item-id")
+        if label_note is not None:
+            raise typer.BadParameter("--note requires --item-id")
+        if category is not None and not reconsider:
+            raise typer.BadParameter(
+                "--category requires --item-id (target label) or --reconsider (queue filter)"
+            )
+    else:
+        if disagreements or reconsider:
+            raise typer.BadParameter(
+                "--item-id is mutually exclusive with --disagreements and --reconsider"
+            )
+
     _load_or_exit(project)
+
+    if item_id is not None:
+        try:
+            run_label_item(
+                project,
+                _db_path(project),
+                Path("projects"),
+                item_id=item_id,
+                category=category,
+                urgency=label_urgency,
+                note=label_note,
+            )
+        except typer.BadParameter as e:
+            typer.echo(str(e), err=True)
+            raise typer.Exit(code=1) from None
+        return
     if not resume:
         # Legacy API kept so tests can exercise both paths; the queue
         # builder still uses the labeled-ids set, so --no-resume is
@@ -498,7 +565,7 @@ def label(
             randomize=randomize,
             disagreements_for_version=disagreements_for_version,
             reconsider=reconsider,
-            reconsider_category=reconsider_category,
+            reconsider_category=category,
             reconsider_urgency_min=urgency_min,
             reconsider_urgency_max=urgency_max,
         )
