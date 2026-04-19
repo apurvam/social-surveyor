@@ -2,11 +2,11 @@
 # See projects/example/classifier.yaml for field-by-field documentation.
 
 version: 1
-# v3.5 expands the urgency note into a calibration block with worked
-# examples. v3's urgency-independence prose wasn't enough — Haiku kept
-# under-rating urgency on alert-worthy items (high-urgency MAE 4.43,
-# alert-worthy recall 0.23). No other rule changes from v3.
-prompt_version: "v3.5"
+# v3 teaches the model about active_practitioner (new in categories.yaml
+# v2, blind to the v2/v2a prompt) and softens v2's Rule 4 tiebreaker
+# into Rule 5's linguistic-evidence criteria. Rule 3 splits into
+# 3a-3d with explicit precedence. Adds an urgency-independence note.
+prompt_version: "v3"
 
 categories_file: "categories.yaml"
 
@@ -115,30 +115,11 @@ additional_instructions: |
        → neutral_discussion
      When torn between neutral_discussion and off_topic, re-check rule 1.
 
-  Urgency note: urgency reflects the post's explicit signals — direct
+  Urgency note: urgency reflects the post's explicit signals (direct
   questions, stated evaluations, strong pain language, cost numbers,
-  active planning — NOT your confidence in the category.
-
-  Calibration examples:
-
-  - "Our Datadog bill went from $30k to $80k last quarter, looking at
-    alternatives" → urgency 9 (concrete pain + active intent)
-  - "We're evaluating Mimir vs VictoriaMetrics for our new cluster,
-    which should we pick?" → urgency 8 (active evaluation + question)
-  - "How does everyone handle Prometheus long-term storage? Planning
-    a migration soon" → urgency 8 (active planning + question)
-  - "We gave up on Thanos, too complex, back on vendor now" → urgency 7
-    (explicit pain with commitment signal)
-  - "We run Mimir and it's been fine for 2 years" → urgency 3 (stable,
-    no active signal)
-  - "Honestly Datadog pricing is a known problem in the industry"
-    → urgency 4 (landscape commentary, no personal stake)
-  - "Use Prometheus + Grafana for metrics, works great" → urgency 2
-    (generic recommendation, no urgency signal)
-
-  Score urgency from signals in the post, independently of category.
-  Do not let category uncertainty suppress urgency. Do not let category
-  confidence inflate urgency.
+  active planning). Score urgency from those signals independently of
+  the category. Do not let category uncertainty suppress urgency, and
+  do not let category confidence inflate urgency.
 
 few_shot_examples: []
 
