@@ -2,7 +2,11 @@
 # See projects/example/classifier.yaml for field-by-field documentation.
 
 version: 1
-prompt_version: "v2"
+# v2a = v2's rules running against the post-v2 taxonomy (active_practitioner
+# added in categories.yaml v2). Rules themselves are unchanged from v2; they
+# don't mention active_practitioner yet — teaching the model about the new
+# category happens in v3 after the relabel pass lands.
+prompt_version: "v2a"
 
 categories_file: "categories.yaml"
 
