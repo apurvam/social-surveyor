@@ -222,25 +222,64 @@ def test_urgency_band_accuracy() -> None:
     assert abs(m["urgency"]["band_accuracy"] - 2 / 3) < 1e-9
 
 
-def test_alert_worthy_precision_recall_urgency_based() -> None:
-    # Human says urgency>=7 on 3 items; model says on 4.
-    # Of model's 4, 2 also have human>=7 → precision 0.5.
-    # Of human's 3, 2 match → recall 2/3.
+def test_alert_worthy_precision_recall_filters_by_category_and_urgency() -> None:
+    # Under the category+urgency semantics (added with the
+    # active_practitioner extension):
+    # - human_alert = urgency>=7 AND label_category in {cost, self, comp} → 3
+    # - model_alert = urgency>=7 AND model_category in {cost, self, comp} → 2
+    # - both       = above and label agrees on urgency-threshold → 2
     pairs = [
-        _pair("cost_complaint", 8, "cost_complaint", 8),  # both ≥7
-        _pair("self_host_intent", 7, "self_host_intent", 9),  # both ≥7
+        _pair("cost_complaint", 8, "cost_complaint", 8),  # both alert & alert-cat
+        _pair("self_host_intent", 7, "self_host_intent", 9),  # both
         _pair("competitor_pain", 9, "competitor_pain", 5),  # human≥7, model<7
-        _pair("off_topic", 2, "off_topic", 7),  # model≥7, human<7
-        _pair("off_topic", 1, "off_topic", 7),  # model≥7, human<7
+        _pair("off_topic", 2, "off_topic", 7),  # model urgency≥7 but not alert-cat
+        _pair("off_topic", 1, "off_topic", 7),  # same — filtered out
         _pair("off_topic", 1, "off_topic", 3),  # neither
     ]
     m = compute_metrics(pairs, _cats(), _ALERT_WORTHY)
     pr = m["alert_worthy_precision_recall"]
     assert pr["n_human_alert"] == 3
-    assert pr["n_model_alert"] == 4
+    assert pr["n_model_alert"] == 2  # was 4 under pure-urgency semantics
     assert pr["n_both"] == 2
-    assert abs(pr["precision"] - 0.5) < 1e-9
+    assert abs(pr["precision"] - 1.0) < 1e-9
     assert abs(pr["recall"] - 2 / 3) < 1e-9
+
+
+def test_alert_worthy_precision_recall_excludes_active_practitioner() -> None:
+    # New category active_practitioner is not alert-worthy even at
+    # urgency=9; it must be excluded from both human and model pools.
+    cats = _cats_with_practitioner()
+    alert_worthy = {"cost_complaint", "self_host_intent", "competitor_pain"}
+    pairs = [
+        _pair("active_practitioner", 9, "active_practitioner", 9),  # neither side
+        _pair("cost_complaint", 8, "cost_complaint", 8),  # both
+        _pair("cost_complaint", 7, "active_practitioner", 9),  # human alert only
+    ]
+    m = compute_metrics(pairs, cats, alert_worthy)
+    pr = m["alert_worthy_precision_recall"]
+    assert pr["n_human_alert"] == 2  # the two cost_complaint labels
+    assert pr["n_model_alert"] == 1  # only the cost_complaint→cost_complaint case
+    assert pr["n_both"] == 1
+    assert abs(pr["precision"] - 1.0) < 1e-9
+    assert abs(pr["recall"] - 0.5) < 1e-9
+
+
+def _cats_with_practitioner() -> CategoryConfig:
+    cats = _cats()
+    return CategoryConfig.model_validate(
+        {
+            "version": 2,
+            "categories": [
+                *(c.model_dump() for c in cats.categories),
+                {
+                    "id": "active_practitioner",
+                    "label": "Practitioner",
+                    "description": "Deep observability practitioner.",
+                },
+            ],
+            "urgency_scale": [b.model_dump() for b in cats.urgency_scale],
+        }
+    )
 
 
 # --- confusion matrix -----------------------------------------------------

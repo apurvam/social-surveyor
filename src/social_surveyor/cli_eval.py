@@ -53,9 +53,16 @@ log = structlog.get_logger("cli.eval")
 
 # Heuristic default used when the project's taxonomy matches the opendata
 # shape. A fork with different categories can override by ... not using
-# these ids. The three ids below are the "alert to Slack" categories for
-# opendata.
-NON_ALERT_WORTHY_DEFAULT = {"off_topic", "neutral_discussion", "tutorial_or_marketing"}
+# these ids. The three alert-worthy categories (by exclusion) are
+# cost_complaint, self_host_intent, and competitor_pain — the
+# relationship-building practitioner and neutral/tutorial/off_topic
+# buckets don't wake anyone up in Slack.
+NON_ALERT_WORTHY_DEFAULT = {
+    "off_topic",
+    "neutral_discussion",
+    "tutorial_or_marketing",
+    "active_practitioner",
+}
 
 # Haiku 4.5 public pricing (USD per million tokens) as of 2026-04.
 # Used only for cost estimates in the eval summary; update when Anthropic
@@ -74,6 +81,7 @@ def run_eval(
     prompt_version_override: str | None,
     verbose: bool,
     export_path: Path | None,
+    re_score: bool = False,
     client: Any | None = None,
     echo_fn: Any = typer.echo,
     progress_every: int = 5,
@@ -81,6 +89,13 @@ def run_eval(
     """Run the eval. Returns the full metrics bundle for programmatic use.
 
     Prints a human-readable summary to stdout via ``echo_fn``.
+
+    When ``re_score=True``: no API calls are made. Cached classifications
+    for the target prompt_version are loaded and scored against the
+    current effective labels. Items without a cached classification are
+    reported as missing but don't block the run. Point of this mode: see
+    what v2's same classifications look like against corrected ground
+    truth after a relabel pass, without paying the re-classify cost.
     """
     try:
         project_cfg = load_project_config(project, projects_root=projects_root)
@@ -110,11 +125,19 @@ def run_eval(
             db=db,
             client=client,
         )
-        pairs, run_cost = harness.build_pairs(
-            effective_labels,
-            echo_fn=echo_fn,
-            progress_every=progress_every,
-        )
+        if re_score:
+            pairs, run_cost = harness.build_pairs_cache_only(
+                effective_labels,
+                echo_fn=echo_fn,
+            )
+        else:
+            pairs, run_cost = harness.build_pairs(
+                effective_labels,
+                echo_fn=echo_fn,
+                progress_every=progress_every,
+            )
+
+        relabel_impact = _compute_relabel_impact(labels_file)
 
         metrics = compute_metrics(pairs, categories, alert_worthy_ids)
 
@@ -166,6 +189,8 @@ def run_eval(
             stabilization=stabilization,
             run_cost=run_cost,
             pairs=pairs,
+            relabel_impact=relabel_impact,
+            re_score=re_score,
         )
         echo_fn(f"\nwrote eval export: {export_path}")
 
@@ -174,6 +199,7 @@ def run_eval(
         "criteria": criteria,
         "stabilization": stabilization,
         "run_cost": run_cost,
+        "relabel_impact": relabel_impact,
     }
 
 
@@ -317,8 +343,150 @@ class _EvalHarness:
             "failures": failures,
         }
 
+    def build_pairs_cache_only(
+        self,
+        effective_labels: list[LabelEntry],
+        *,
+        echo_fn: Any,
+    ) -> tuple[list[EvalPair], dict[str, int]]:
+        """Cache-only variant used by ``--re-score``.
+
+        No API calls; no classifier instantiated. Items without a
+        cached classification for the target prompt_version are
+        reported as ``missing_classification`` but don't block the run.
+        Use case: re-scoring existing classifications against corrected
+        labels.
+        """
+        pairs: list[EvalPair] = []
+        cached = 0
+        missing_in_db = 0
+        missing_classification = 0
+
+        for label in effective_labels:
+            source, platform_id = _split_canonical(label.item_id)
+            row = self.db.get_item_by_id(source, platform_id)
+            if row is None:
+                missing_in_db += 1
+                pairs.append(
+                    EvalPair(
+                        item_id=label.item_id,
+                        label_category=label.category,
+                        label_urgency=label.urgency,
+                        model_category=None,
+                        model_urgency=None,
+                        source=source,
+                    )
+                )
+                continue
+
+            existing = self.db.get_classification(
+                label.item_id,
+                self.clf_cfg.prompt_version,
+            )
+            if existing is None:
+                # No classification for this version. Don't classify;
+                # just flag and move on. These items are excluded from
+                # metric computations (classification_failures count).
+                missing_classification += 1
+                pairs.append(
+                    EvalPair(
+                        item_id=label.item_id,
+                        label_category=label.category,
+                        label_urgency=label.urgency,
+                        model_category=None,
+                        model_urgency=None,
+                        source=source,
+                        title=row.get("title") or "",
+                        body=row.get("body") or "",
+                    )
+                )
+                continue
+
+            cached += 1
+            pairs.append(
+                EvalPair(
+                    item_id=label.item_id,
+                    label_category=label.category,
+                    label_urgency=label.urgency,
+                    model_category=existing["category"],
+                    model_urgency=int(existing["urgency"]),
+                    source=source,
+                    title=row.get("title") or "",
+                    body=row.get("body") or "",
+                )
+            )
+
+        if missing_classification:
+            echo_fn(
+                f"  note: {missing_classification} labeled items have no "
+                f"classification under prompt_version="
+                f"{self.clf_cfg.prompt_version!r}; excluded from metrics"
+            )
+
+        return pairs, {
+            "cached": cached,
+            "newly_classified": 0,
+            "input_tokens": 0,
+            "output_tokens": 0,
+            "missing_in_db": missing_in_db,
+            "failures": missing_classification,
+        }
+
 
 # --- label resolution ---------------------------------------------------
+
+
+def _compute_relabel_impact(path: Path) -> dict[str, Any]:
+    """Detect items whose label has been changed in labeled.jsonl.
+
+    A "relabel" is an item_id with >1 label entries where the earliest
+    entry's (category, urgency) tuple differs from the latest's. Items
+    with identical repeated entries (happens occasionally via Ctrl-C
+    retries) are not counted.
+
+    Returns a block safe to include in the JSON export and readable by
+    the Phase 5 summary without additional parsing.
+    """
+    if not path.exists():
+        return {"total_relabeled": 0, "relabels": []}
+
+    by_item: dict[str, list[LabelEntry]] = {}
+    for e in iter_label_entries(path):
+        by_item.setdefault(e.item_id, []).append(e)
+
+    relabels: list[dict[str, Any]] = []
+    for item_id, entries in by_item.items():
+        if len(entries) < 2:
+            continue
+        entries_sorted = sorted(entries, key=lambda x: x.labeled_at)
+        earliest = entries_sorted[0]
+        latest = entries_sorted[-1]
+        if (earliest.category, earliest.urgency) == (latest.category, latest.urgency):
+            continue
+        relabels.append(
+            {
+                "item_id": item_id,
+                "old_category": earliest.category,
+                "old_urgency": earliest.urgency,
+                "new_category": latest.category,
+                "new_urgency": latest.urgency,
+                "relabeled_at": latest.labeled_at.isoformat(),
+            }
+        )
+    # Deterministic ordering makes the export diff-friendly.
+    relabels.sort(key=lambda r: r["item_id"])
+
+    # Category-migration rollup: how many items moved from X to Y.
+    migrations: dict[str, int] = {}
+    for r in relabels:
+        key = f"{r['old_category']} → {r['new_category']}"
+        migrations[key] = migrations.get(key, 0) + 1
+
+    return {
+        "total_relabeled": len(relabels),
+        "migrations": dict(sorted(migrations.items(), key=lambda kv: -kv[1])),
+        "relabels": relabels,
+    }
 
 
 def _load_effective_labels(path: Path) -> list[LabelEntry]:
@@ -600,6 +768,8 @@ def _export(
     stabilization: dict[str, Any] | None,
     run_cost: dict[str, int],
     pairs: list[EvalPair],
+    relabel_impact: dict[str, Any] | None = None,
+    re_score: bool = False,
 ) -> None:
     disagreements = []
     for p in pairs:
@@ -627,10 +797,11 @@ def _export(
     for p in pairs:
         per_source_counts[p.source] += 1
 
-    data = {
+    data: dict[str, Any] = {
         "prompt_version": clf_cfg.prompt_version,
         "model": clf_cfg.model,
         "generated_at": datetime.now(UTC).isoformat(),
+        "mode": "re-score" if re_score else "classify+score",
         "metrics": metrics,
         "stop_criteria": criteria,
         "stabilization": stabilization,
@@ -641,6 +812,11 @@ def _export(
         "items_by_source": dict(per_source_counts),
         "disagreements": disagreements,
     }
+    if relabel_impact is not None:
+        # Surface relabel_impact at the top of the export so readers
+        # (and the Phase 5 summary generator) see it before the
+        # disagreement details.
+        data = {"relabel_impact": relabel_impact, **data}
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(data, indent=2, default=str), encoding="utf-8")
 

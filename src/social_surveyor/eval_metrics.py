@@ -80,7 +80,7 @@ def compute_metrics(
     alert_worthy_acc = _alert_worthy_accuracy(succeeded, alert_worthy_category_ids)
     per_category = _per_category_prf1(succeeded, category_ids)
     urgency = _urgency_stats(succeeded, categories)
-    alert_worthy_pr = _alert_worthy_precision_recall(succeeded)
+    alert_worthy_pr = _alert_worthy_precision_recall(succeeded, alert_worthy_category_ids)
     confusion = _confusion_matrix_3x3(succeeded, alert_worthy_category_ids)
 
     return {
@@ -343,14 +343,36 @@ def _same_band(a: int, b: int, categories: CategoryConfig) -> bool:
     return False
 
 
-def _alert_worthy_precision_recall(succeeded: list[EvalPair]) -> dict[str, Any]:
-    human_alert = [p for p in succeeded if p.label_urgency >= ALERT_URGENCY_THRESHOLD]
+def _alert_worthy_precision_recall(
+    succeeded: list[EvalPair],
+    alert_worthy_ids: set[str],
+) -> dict[str, Any]:
+    """Precision/recall over items that BOTH pass the urgency threshold
+    AND fall in an alert-worthy category on the relevant side.
+
+    Changed in the active_practitioner extension (categories.yaml v2):
+    previously urgency-only. The category filter excludes labels like
+    ``active_practitioner`` (relationship-building, not sales-urgent)
+    and ``neutral_discussion`` (no engagement signal) from the pool
+    even if they carry a high urgency score.
+    """
+    human_alert = [
+        p
+        for p in succeeded
+        if p.label_urgency >= ALERT_URGENCY_THRESHOLD and p.label_category in alert_worthy_ids
+    ]
     model_alert = [
         p
         for p in succeeded
-        if p.model_urgency is not None and p.model_urgency >= ALERT_URGENCY_THRESHOLD
+        if p.model_urgency is not None
+        and p.model_urgency >= ALERT_URGENCY_THRESHOLD
+        and p.model_category in alert_worthy_ids
     ]
-    both = [p for p in model_alert if p.label_urgency >= ALERT_URGENCY_THRESHOLD]
+    both = [
+        p
+        for p in model_alert
+        if p.label_urgency >= ALERT_URGENCY_THRESHOLD and p.label_category in alert_worthy_ids
+    ]
     return {
         "precision": _safe_div(len(both), len(model_alert)),
         "recall": _safe_div(len(both), len(human_alert)),

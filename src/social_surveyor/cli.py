@@ -590,13 +590,26 @@ def eval(
             help="Write the full eval run (metrics + disagreements) as JSON.",
         ),
     ] = None,
+    re_score: Annotated[
+        bool,
+        typer.Option(
+            "--re-score",
+            help=(
+                "Score existing cached classifications against the current "
+                "labels — no API calls. Use after a taxonomy extension or "
+                "relabel pass to see the delta without paying classification "
+                "costs."
+            ),
+        ),
+    ] = False,
 ) -> None:
     """Score the classifier against labeled.jsonl.
 
     Version-exact-match semantics: only classifications under the
     specified (or configured) prompt_version count as cache hits.
     Missing classifications get classified now — warm cache means <30s
-    eval; cold start hits ~2s per Haiku call.
+    eval; cold start hits ~2s per Haiku call. ``--re-score`` skips the
+    classifier entirely and reports missing-cache items as excluded.
     """
     try:
         run_eval(
@@ -606,6 +619,7 @@ def eval(
             prompt_version_override=prompt_version,
             verbose=verbose,
             export_path=export,
+            re_score=re_score,
         )
     except typer.BadParameter as e:
         typer.echo(str(e), err=True)

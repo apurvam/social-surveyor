@@ -268,6 +268,193 @@ def test_eval_verbose_prints_disagreements(tmp_path: Path) -> None:
     assert "model=off_topic" in output
 
 
+def test_eval_re_score_makes_zero_api_calls(tmp_path: Path) -> None:
+    """--re-score must never instantiate the classifier."""
+    projects_root = _write_project_configs(tmp_path)
+    db_path = tmp_path / "data" / "demo.db"
+    labels_file = labels_path("demo", projects_root=projects_root)
+    labels_file.parent.mkdir(parents=True, exist_ok=True)
+
+    with Storage(db_path) as db:
+        _seed_item_and_label(
+            db,
+            labels_file,
+            "hackernews:r1",
+            title="t",
+            label_category="cost_complaint",
+            label_urgency=8,
+        )
+        _prime_classification(db, "hackernews:r1", "v1", category="cost_complaint", urgency=8)
+        # Item with no classification for v1 — should be flagged missing
+        # but not block the run.
+        _seed_item_and_label(
+            db,
+            labels_file,
+            "hackernews:r2",
+            title="t2",
+            label_category="off_topic",
+            label_urgency=1,
+        )
+
+    client = FakeClient([])  # any API call would assert
+    result = run_eval(
+        "demo",
+        db_path,
+        projects_root,
+        prompt_version_override=None,
+        verbose=False,
+        export_path=None,
+        re_score=True,
+        client=client,
+        echo_fn=lambda _m: None,
+        progress_every=0,
+    )
+    assert len(client.messages.calls) == 0
+    assert result["run_cost"]["newly_classified"] == 0
+    assert result["run_cost"]["cached"] == 1
+    # The unclassified item is reported as a failure (not blocking).
+    assert result["run_cost"]["failures"] == 1
+
+
+def test_eval_re_score_export_contains_relabel_impact(tmp_path: Path) -> None:
+    projects_root = _write_project_configs(tmp_path)
+    db_path = tmp_path / "data" / "demo.db"
+    labels_file = labels_path("demo", projects_root=projects_root)
+    labels_file.parent.mkdir(parents=True, exist_ok=True)
+
+    with Storage(db_path) as db:
+        _seed_item_and_label(
+            db,
+            labels_file,
+            "hackernews:rl1",
+            title="t",
+            label_category="self_host_intent",
+            label_urgency=8,
+        )
+        # Simulate a relabel: append a second entry with a different
+        # category + a later timestamp.
+        entry = make_entry(
+            item_id="hackernews:rl1",
+            category="off_topic",
+            urgency=0,
+            note="reconsidered",
+        )
+        d = entry.model_dump()
+        d["labeled_at"] = datetime(2099, 1, 1, tzinfo=UTC).isoformat()
+        with labels_file.open("a", encoding="utf-8") as f:
+            f.write(json.dumps(d) + "\n")
+
+        _prime_classification(db, "hackernews:rl1", "v1", category="self_host_intent", urgency=8)
+
+    export = tmp_path / "out.json"
+    run_eval(
+        "demo",
+        db_path,
+        projects_root,
+        prompt_version_override=None,
+        verbose=False,
+        export_path=export,
+        re_score=True,
+        client=FakeClient([]),
+        echo_fn=lambda _m: None,
+        progress_every=0,
+    )
+    data = json.loads(export.read_text())
+    assert data["mode"] == "re-score"
+    ri = data["relabel_impact"]
+    assert ri["total_relabeled"] == 1
+    r = ri["relabels"][0]
+    assert r["item_id"] == "hackernews:rl1"
+    assert r["old_category"] == "self_host_intent"
+    assert r["new_category"] == "off_topic"
+    assert "self_host_intent → off_topic" in ri["migrations"]
+
+
+def test_eval_re_score_uses_latest_label_against_cached_classification(
+    tmp_path: Path,
+) -> None:
+    """The whole point of --re-score: measure a cached classification
+    against a corrected label, and watch the accuracy shift without
+    re-classifying."""
+    projects_root = _write_project_configs(tmp_path)
+    db_path = tmp_path / "data" / "demo.db"
+    labels_file = labels_path("demo", projects_root=projects_root)
+    labels_file.parent.mkdir(parents=True, exist_ok=True)
+
+    with Storage(db_path) as db:
+        # Original label was self_host_intent.
+        _seed_item_and_label(
+            db,
+            labels_file,
+            "hackernews:rl2",
+            title="t",
+            label_category="self_host_intent",
+            label_urgency=8,
+        )
+        _prime_classification(db, "hackernews:rl2", "v1", category="off_topic", urgency=0)
+        # Relabel: now off_topic — the classifier was right all along.
+        entry = make_entry(
+            item_id="hackernews:rl2",
+            category="off_topic",
+            urgency=0,
+            note=None,
+        )
+        d = entry.model_dump()
+        d["labeled_at"] = datetime(2099, 1, 1, tzinfo=UTC).isoformat()
+        with labels_file.open("a", encoding="utf-8") as f:
+            f.write(json.dumps(d) + "\n")
+
+    result = run_eval(
+        "demo",
+        db_path,
+        projects_root,
+        prompt_version_override=None,
+        verbose=False,
+        export_path=None,
+        re_score=True,
+        client=FakeClient([]),
+        echo_fn=lambda _m: None,
+        progress_every=0,
+    )
+    # Accuracy against the NEW label: 1/1 agreement.
+    assert result["metrics"]["overall_accuracy"]["accuracy"] == 1.0
+
+
+def test_compute_relabel_impact_ignores_single_entry_items(tmp_path: Path) -> None:
+    from social_surveyor.cli_eval import _compute_relabel_impact
+
+    labels_file = tmp_path / "labeled.jsonl"
+    append_label(
+        labels_file,
+        make_entry(item_id="a:1", category="cost_complaint", urgency=8, note=None),
+    )
+    append_label(
+        labels_file,
+        make_entry(item_id="b:2", category="off_topic", urgency=0, note=None),
+    )
+    ri = _compute_relabel_impact(labels_file)
+    assert ri["total_relabeled"] == 0
+    assert ri["relabels"] == []
+
+
+def test_compute_relabel_impact_ignores_identical_repeats(tmp_path: Path) -> None:
+    from social_surveyor.cli_eval import _compute_relabel_impact
+
+    labels_file = tmp_path / "labeled.jsonl"
+    # Two identical entries for the same item — not a real relabel,
+    # just a Ctrl-C retry pattern.
+    append_label(
+        labels_file,
+        make_entry(item_id="a:1", category="cost_complaint", urgency=8, note=None),
+    )
+    append_label(
+        labels_file,
+        make_entry(item_id="a:1", category="cost_complaint", urgency=8, note=None),
+    )
+    ri = _compute_relabel_impact(labels_file)
+    assert ri["total_relabeled"] == 0
+
+
 def test_eval_latest_wins_on_duplicate_labels(tmp_path: Path) -> None:
     projects_root = _write_project_configs(tmp_path)
     db_path = tmp_path / "data" / "demo.db"
