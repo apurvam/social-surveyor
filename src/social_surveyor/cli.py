@@ -13,6 +13,13 @@ import typer
 from dotenv import load_dotenv
 
 from . import __version__
+from .cli_classify import run_classify
+from .cli_eval import (
+    HAIKU_INPUT_USD_PER_MTOK,
+    HAIKU_OUTPUT_USD_PER_MTOK,
+    run_eval,
+)
+from .cli_explain import run_explain
 from .cli_label import run_label
 from .cli_setup import run_setup
 from .cli_stats import run_stats
@@ -276,17 +283,21 @@ def usage(
     project: Annotated[str, typer.Option("--project", help="Project name.")],
     source: Annotated[
         str | None,
-        typer.Option("--source", help="Limit report to one source (defaults to all)."),
+        typer.Option(
+            "--source",
+            help=(
+                "Limit report to one source. 'anthropic' reports Haiku "
+                "classification token spend; all other names map to poll "
+                "sources."
+            ),
+        ),
     ] = None,
 ) -> None:
     """Print today- and month-to-date API usage for cost-relevant sources.
 
-    Reddit, Hacker News, and GitHub are free-tier and don't track usage.
-    Only X tracks reads; its figures reflect the daily cap enforcement.
+    Reddit, Hacker News, and GitHub are free-tier and don't track
+    usage. X tracks reads; anthropic tracks classification tokens.
     """
-    cfg = _load_or_exit(project)
-    names = _select_source_names(cfg, source)
-
     db_path = _db_path(project)
     if not db_path.is_file():
         typer.echo(f"no DB at {db_path} yet — run a poll first", err=True)
@@ -296,17 +307,31 @@ def usage(
     start_of_day = now.replace(hour=0, minute=0, second=0, microsecond=0)
     start_of_month = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
 
+    # anthropic is a reporting-only source — not a poll source — so it
+    # doesn't need ProjectConfig validation.
+    if source == "anthropic":
+        db = Storage(db_path)
+        try:
+            report = _anthropic_usage_report(db, start_of_day, start_of_month)
+            _print_json(report)
+        finally:
+            db.close()
+        return
+
+    cfg = _load_or_exit(project)
+    names = _select_source_names(cfg, source)
+
     db = Storage(db_path)
     try:
-        report: dict[str, dict[str, object]] = {}
+        report_all: dict[str, dict[str, object]] = {}
         for name in names:
             if name != "x":
-                report[name] = {"tier": "free", "tracked": False}
+                report_all[name] = {"tier": "free", "tracked": False}
                 continue
             today_total = db.sum_api_usage("x", start_of_day)
             month_total = db.sum_api_usage("x", start_of_month)
             today_by_query = db.api_usage_by_query("x", start_of_day)
-            report[name] = {
+            report_all[name] = {
                 "tier": "pay-per-use",
                 "tracked": True,
                 "used_today": today_total,
@@ -314,9 +339,50 @@ def usage(
                 "daily_read_cap": cfg.x.daily_read_cap if cfg.x is not None else None,
                 "today_by_query": today_by_query,
             }
-        _print_json(report)
+        _print_json(report_all)
     finally:
         db.close()
+
+
+def _anthropic_usage_report(
+    db: Storage,
+    start_of_day: datetime,
+    start_of_month: datetime,
+) -> dict[str, object]:
+    today_in, today_out = db.sum_api_tokens("anthropic", start_of_day)
+    month_in, month_out = db.sum_api_tokens("anthropic", start_of_month)
+    today_calls = db.sum_api_usage("anthropic", start_of_day)
+    month_calls = db.sum_api_usage("anthropic", start_of_month)
+    today_by_version = db.api_usage_by_query("anthropic", start_of_day)
+    return {
+        "source": "anthropic",
+        "tier": "usage-based",
+        "tracked": True,
+        "today": {
+            "calls": today_calls,
+            "input_tokens": today_in,
+            "output_tokens": today_out,
+            "usd_estimate": _haiku_usd(today_in, today_out),
+        },
+        "month_to_date": {
+            "calls": month_calls,
+            "input_tokens": month_in,
+            "output_tokens": month_out,
+            "usd_estimate": _haiku_usd(month_in, month_out),
+        },
+        "today_by_prompt_version": today_by_version,
+        "prices": {
+            "input_usd_per_mtok": HAIKU_INPUT_USD_PER_MTOK,
+            "output_usd_per_mtok": HAIKU_OUTPUT_USD_PER_MTOK,
+        },
+    }
+
+
+def _haiku_usd(input_tokens: int, output_tokens: int) -> float:
+    return (
+        input_tokens / 1_000_000 * HAIKU_INPUT_USD_PER_MTOK
+        + output_tokens / 1_000_000 * HAIKU_OUTPUT_USD_PER_MTOK
+    )
 
 
 @app.command()
@@ -352,6 +418,7 @@ def label(
         typer.echo(
             "(--no-resume is currently equivalent to --resume; items in labeled.jsonl are always skipped)"
         )
+
     try:
         result = run_label(
             project,
@@ -367,6 +434,125 @@ def label(
         f"\ndone — labeled={result['labeled']} skipped={result['skipped']} "
         f"remaining={result['remaining']}"
     )
+
+
+@app.command()
+def classify(
+    project: Annotated[str, typer.Option("--project", help="Project name.")],
+    item_id: Annotated[
+        str | None,
+        typer.Option(
+            "--item-id",
+            help="Classify exactly one item (canonical {source}:{platform_id}).",
+        ),
+    ] = None,
+    limit: Annotated[
+        int | None,
+        typer.Option("--limit", min=1, help="Cap on items classified in batch mode."),
+    ] = None,
+    prompt_version: Annotated[
+        str | None,
+        typer.Option(
+            "--prompt-version",
+            help="Override prompt_version from classifier.yaml for this run.",
+        ),
+    ] = None,
+    dry_run: Annotated[
+        bool,
+        typer.Option(
+            "--dry-run",
+            help="Build the prompt and print it; don't call the Anthropic API.",
+        ),
+    ] = False,
+) -> None:
+    """Classify unclassified items under the active prompt_version.
+
+    Sequential, one item at a time — throughput optimization is a
+    Session 5 concern. Re-running classify is safe: items that already
+    have a classification for the active prompt_version are skipped
+    (use --prompt-version v2 to re-classify them under a different
+    version).
+    """
+    try:
+        run_classify(
+            project,
+            _db_path(project),
+            Path("projects"),
+            item_id=item_id,
+            limit=limit,
+            prompt_version_override=prompt_version,
+            dry_run=dry_run,
+        )
+    except typer.BadParameter as e:
+        typer.echo(str(e), err=True)
+        raise typer.Exit(code=1) from None
+
+
+@app.command()
+def eval(
+    project: Annotated[str, typer.Option("--project", help="Project name.")],
+    prompt_version: Annotated[
+        str | None,
+        typer.Option(
+            "--prompt-version",
+            help="Override the version to eval. Defaults to classifier.yaml.",
+        ),
+    ] = None,
+    verbose: Annotated[
+        bool,
+        typer.Option("--verbose", help="Print a per-item disagreement diff."),
+    ] = False,
+    export: Annotated[
+        Path | None,
+        typer.Option(
+            "--export",
+            help="Write the full eval run (metrics + disagreements) as JSON.",
+        ),
+    ] = None,
+) -> None:
+    """Score the classifier against labeled.jsonl.
+
+    Version-exact-match semantics: only classifications under the
+    specified (or configured) prompt_version count as cache hits.
+    Missing classifications get classified now — warm cache means <30s
+    eval; cold start hits ~2s per Haiku call.
+    """
+    try:
+        run_eval(
+            project,
+            _db_path(project),
+            Path("projects"),
+            prompt_version_override=prompt_version,
+            verbose=verbose,
+            export_path=export,
+        )
+    except typer.BadParameter as e:
+        typer.echo(str(e), err=True)
+        raise typer.Exit(code=1) from None
+
+
+@app.command()
+def explain(
+    project: Annotated[str, typer.Option("--project", help="Project name.")],
+    item_id: Annotated[
+        str,
+        typer.Option(
+            "--item-id",
+            help="Canonical id — {source}:{platform_id}, e.g. 'hackernews:41234567'.",
+        ),
+    ],
+) -> None:
+    """Dump raw item, effective label, every classification, and the current prompt."""
+    try:
+        run_explain(
+            project,
+            _db_path(project),
+            Path("projects"),
+            item_id=item_id,
+        )
+    except typer.BadParameter as e:
+        typer.echo(str(e), err=True)
+        raise typer.Exit(code=1) from None
 
 
 @app.command()
