@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import sys
 from collections.abc import Callable
 from dataclasses import asdict
@@ -135,7 +136,8 @@ def _build_source(name: str, cfg: ProjectConfig, storage: Storage) -> Source:
 
 
 def _db_path(project: str) -> Path:
-    return Path("data") / f"{project}.db"
+    data_dir = os.environ.get("SOCIAL_SURVEYOR_DATA_DIR", "data")
+    return Path(data_dir) / f"{project}.db"
 
 
 def _item_to_dict(item: RawItem) -> dict[str, object]:
