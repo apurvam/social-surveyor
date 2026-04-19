@@ -79,6 +79,52 @@ def _build_queue(
     return queue
 
 
+def _build_reconsider_queue(
+    labels_file: Path,
+    *,
+    category_filter: str | None,
+    urgency_min: int | None,
+    urgency_max: int | None,
+    source_filter: str | None,
+) -> list[tuple[str, str, LabelEntry]]:
+    """Already-labeled items matching the filters, plus their effective
+    (latest-wins) label.
+
+    Used by ``label --reconsider`` to walk items through a sharpened
+    taxonomy. Unlike ``_build_queue`` which excludes labeled items, this
+    queue is specifically the labeled set — the point is to re-examine
+    existing decisions against updated category definitions.
+
+    The latest-wins logic means each item appears once even if it has
+    been relabeled before; the user sees the current effective label
+    and can append a new one (or keep).
+    """
+    entries = iter_label_entries(labels_file)
+    latest_by_id: dict[str, LabelEntry] = {}
+    for e in entries:
+        prior = latest_by_id.get(e.item_id)
+        if prior is None or e.labeled_at > prior.labeled_at:
+            latest_by_id[e.item_id] = e
+
+    queue: list[tuple[str, str, LabelEntry]] = []
+    for item_id, label in latest_by_id.items():
+        if category_filter is not None and label.category != category_filter:
+            continue
+        if urgency_min is not None and label.urgency < urgency_min:
+            continue
+        if urgency_max is not None and label.urgency > urgency_max:
+            continue
+        src, _, platform_id = item_id.partition(":")
+        if source_filter is not None and src != source_filter:
+            continue
+        queue.append((src, platform_id, label))
+    # Deterministic order: oldest-label-first is least surprising for a
+    # review pass — users see items they labeled earliest (and where
+    # their taxonomy calibration may have drifted most) first.
+    queue.sort(key=lambda t: t[2].labeled_at)
+    return queue
+
+
 def _build_disagreement_queue(
     db: Storage,
     labels_file: Path,
@@ -153,6 +199,61 @@ def _render_item(
     return "\n".join(lines)
 
 
+def _render_item_with_current_label(
+    item: dict[str, Any],
+    label: LabelEntry,
+    cfg: CategoryConfig,
+    index: int,
+    total: int,
+) -> str:
+    """Render shape used by --reconsider mode.
+
+    Shows the current label prominently so the user can decide whether
+    it still fits the (possibly updated) taxonomy, plus the full
+    category list WITH descriptions so any taxonomy sharpening since
+    the original label is visible.
+    """
+    title = item.get("title") or "(no title)"
+    author = item.get("author") or "(anonymous)"
+    url = item.get("url") or "(no url)"
+    created = item.get("created_at")
+    created_str = created.isoformat() if hasattr(created, "isoformat") else str(created)
+    body = item.get("body") or ""
+    body_preview = body.strip()[:400]
+    if len(body) > 400:
+        body_preview += "…"
+
+    lines: list[str] = []
+    lines.append("")
+    lines.append(f"[{index}/{total}]  {item['source']} — {created_str}")
+    lines.append(f"Title:  {title}")
+    lines.append(f"Author: {author}")
+    lines.append(f"URL:    {url}")
+    if body_preview:
+        lines.append("")
+        lines.append("Body:")
+        for bline in body_preview.splitlines() or [body_preview]:
+            lines.append(f"  {bline}")
+    lines.append("")
+    lines.append(
+        f"Current label: {label.category}  urgency={label.urgency}  "
+        f"labeled_at={label.labeled_at.isoformat()}"
+    )
+    if label.note:
+        lines.append(f"  note: {label.note}")
+    lines.append("")
+    lines.append("Categories (current definitions):")
+    for i, cat in enumerate(cfg.categories, start=1):
+        lines.append(f"  {i}) {cat.id}  —  {cat.label}")
+        # Trim description to one line for the loop — the user can
+        # consult categories.yaml for the full text when needed.
+        desc = " ".join(cat.description.split())
+        if desc:
+            lines.append(f"       {desc}")
+    lines.append("")
+    return "\n".join(lines)
+
+
 def _render_urgency_scale(cfg: CategoryConfig) -> str:
     lines = ["Urgency scale:"]
     for band in cfg.urgency_scale:
@@ -200,17 +301,25 @@ def run_label(
     source: str | None,
     randomize: bool,
     disagreements_for_version: str | None = None,
+    reconsider: bool = False,
+    reconsider_category: str | None = None,
+    reconsider_urgency_min: int | None = None,
+    reconsider_urgency_max: int | None = None,
     input_fn=input,
     echo_fn=typer.echo,
 ) -> dict[str, int]:
     """Run the interactive label loop and return a result counter.
 
-    When ``disagreements_for_version`` is set, the queue is built from
-    labeled items whose classification under that prompt_version
-    disagrees with the human label — the "the classifier said X but I
-    said Y" flow. In that mode, "already labeled" is not a skip reason;
-    the user is explicitly re-examining these items. New label appends
-    win per latest-wins semantics.
+    Three modes:
+
+    - default: walk unlabeled items, record labels.
+    - ``disagreements_for_version``: walk labeled items whose
+      classification under that prompt_version disagrees with the human
+      label.
+    - ``reconsider=True``: walk already-labeled items (filtered by
+      category/urgency) to re-examine them against the current taxonomy.
+      Default action per item is keep-current; relabel requires an
+      explicit category choice.
 
     ``input_fn`` and ``echo_fn`` are dependency-injected so tests can
     feed scripted input without touching a real terminal.
@@ -221,7 +330,24 @@ def run_label(
     if not db_path.is_file():
         raise typer.BadParameter(f"no DB at {db_path} yet — run a poll first")
 
+    if reconsider and disagreements_for_version is not None:
+        raise typer.BadParameter("--reconsider and --disagreements are mutually exclusive")
+
     with Storage(db_path) as db:
+        if reconsider:
+            return _run_reconsider(
+                cfg=cfg,
+                db=db,
+                labels_file=labels_file,
+                project=project,
+                category_filter=reconsider_category,
+                urgency_min=reconsider_urgency_min,
+                urgency_max=reconsider_urgency_max,
+                source_filter=source,
+                input_fn=input_fn,
+                echo_fn=echo_fn,
+            )
+
         if disagreements_for_version is not None:
             queue = _build_disagreement_queue(db, labels_file, disagreements_for_version, source)
             mode_desc = f"disagreements vs prompt_version={disagreements_for_version!r}"
@@ -298,6 +424,142 @@ def run_label(
         "skipped": session.skipped,
         "remaining": max(0, session.total - session.index),
     }
+
+
+def _run_reconsider(
+    *,
+    cfg: CategoryConfig,
+    db: Storage,
+    labels_file: Path,
+    project: str,
+    category_filter: str | None,
+    urgency_min: int | None,
+    urgency_max: int | None,
+    source_filter: str | None,
+    input_fn: Any,
+    echo_fn: Any,
+) -> dict[str, int]:
+    """Guided relabel walkthrough.
+
+    Default action per item is keep-current (Enter). Relabel requires
+    typing a category (number or id); the user is then prompted for a
+    new urgency (current as default) and optional note. ``b``ack is
+    intentionally omitted in this mode — the semantics are ambiguous
+    (pop the last appended relabel? rewind to a kept item?). Users can
+    quit and re-run with different filters to reach any item.
+    """
+    queue = _build_reconsider_queue(
+        labels_file,
+        category_filter=category_filter,
+        urgency_min=urgency_min,
+        urgency_max=urgency_max,
+        source_filter=source_filter,
+    )
+    total = len(queue)
+
+    filter_bits: list[str] = []
+    if category_filter is not None:
+        filter_bits.append(f"category={category_filter!r}")
+    if urgency_min is not None:
+        filter_bits.append(f"urgency>={urgency_min}")
+    if urgency_max is not None:
+        filter_bits.append(f"urgency<={urgency_max}")
+    if source_filter is not None:
+        filter_bits.append(f"source={source_filter!r}")
+    filter_desc = ", ".join(filter_bits) if filter_bits else "all labeled items"
+    echo_fn(
+        f"reconsidering {total} labeled items for project '{project}' "
+        f"({filter_desc}, oldest-label-first)"
+    )
+    echo_fn(_render_urgency_scale(cfg))
+
+    kept = 0
+    relabeled = 0
+    skipped = 0
+
+    index = 0
+    while index < total:
+        src, platform_id, current = queue[index]
+        item = db.get_item_by_id(src, platform_id)
+        if item is None:
+            # Item vanished since the queue was built; count as skip.
+            skipped += 1
+            index += 1
+            continue
+
+        echo_fn(_render_item_with_current_label(item, current, cfg, index + 1, total))
+        raw = input_fn("Keep current [Enter] / Relabel (number or id) / [s]kip / [q]uit: ").strip()
+
+        if raw == _QUIT:
+            break
+        if raw == "" or raw == _SKIP:
+            # Enter and s are equivalent — both mean "leave the current
+            # label in place." Kept counter exists so tests and the
+            # caller can tell active-keeps from timeouts.
+            kept += 1
+            index += 1
+            continue
+
+        cat_id = _resolve_category(raw, cfg)
+        if cat_id is None:
+            echo_fn("unknown category; try again")
+            continue
+
+        new_urgency = _prompt_urgency_with_default(input_fn, echo_fn, default=current.urgency)
+        if new_urgency is None:
+            # User bailed on the urgency prompt — treat as skip so the
+            # existing label stays in place.
+            skipped += 1
+            index += 1
+            continue
+        note = input_fn("Note (optional, empty to skip): ").strip() or None
+
+        entry = make_entry(
+            item_id=f"{src}:{platform_id}",
+            category=cat_id,
+            urgency=new_urgency,
+            note=note,
+        )
+        append_label(labels_file, entry)
+        relabeled += 1
+        index += 1
+        echo_fn(f"  relabeled: {current.category} u={current.urgency} → {cat_id} u={new_urgency}")
+
+    return {
+        "total": total,
+        # "labeled" key mirrors the standard flow so callers can use the
+        # same result shape. In --reconsider mode this is a relabel
+        # count; tests and the caller also see the finer-grained keys.
+        "labeled": relabeled,
+        "kept": kept,
+        "skipped": skipped,
+        "remaining": max(0, total - index),
+    }
+
+
+def _prompt_urgency_with_default(
+    input_fn: Any,
+    echo_fn: Any,
+    *,
+    default: int,
+) -> int | None:
+    """Urgency prompt with an Enter-to-accept default. ``s`` abandons."""
+    for _ in range(5):
+        raw = input_fn(f"Urgency (0-10, Enter={default}, s=skip item): ").strip()
+        if raw == "":
+            return default
+        if raw == _SKIP:
+            return None
+        try:
+            val = int(raw)
+        except ValueError:
+            echo_fn("urgency must be an integer 0-10")
+            continue
+        if 0 <= val <= 10:
+            return val
+        echo_fn("urgency out of range")
+    echo_fn("too many bad urgency inputs; skipping item")
+    return None
 
 
 def _echo_disagreement_context(

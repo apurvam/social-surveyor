@@ -422,6 +422,43 @@ def label(
             help="Override prompt_version for --disagreements mode.",
         ),
     ] = None,
+    reconsider: Annotated[
+        bool,
+        typer.Option(
+            "--reconsider",
+            help=(
+                "Walk already-labeled items to re-examine them against the "
+                "current taxonomy. Use after extending categories.yaml to "
+                "propagate the sharper definitions into labeled.jsonl. "
+                "Enter keeps the current label; type a category to relabel."
+            ),
+        ),
+    ] = False,
+    reconsider_category: Annotated[
+        str | None,
+        typer.Option(
+            "--category",
+            help="Filter --reconsider queue to items currently labeled as this category.",
+        ),
+    ] = None,
+    urgency_min: Annotated[
+        int | None,
+        typer.Option(
+            "--urgency-min",
+            min=0,
+            max=10,
+            help="Filter --reconsider queue to items whose current urgency is >= this.",
+        ),
+    ] = None,
+    urgency_max: Annotated[
+        int | None,
+        typer.Option(
+            "--urgency-max",
+            min=0,
+            max=10,
+            help="Filter --reconsider queue to items whose current urgency is <= this.",
+        ),
+    ] = None,
 ) -> None:
     """Walk through unlabeled items and record category + urgency + optional note.
 
@@ -460,14 +497,24 @@ def label(
             source=source,
             randomize=randomize,
             disagreements_for_version=disagreements_for_version,
+            reconsider=reconsider,
+            reconsider_category=reconsider_category,
+            reconsider_urgency_min=urgency_min,
+            reconsider_urgency_max=urgency_max,
         )
     except typer.BadParameter as e:
         typer.echo(str(e), err=True)
         raise typer.Exit(code=1) from None
-    typer.echo(
-        f"\ndone — labeled={result['labeled']} skipped={result['skipped']} "
-        f"remaining={result['remaining']}"
-    )
+    if reconsider:
+        typer.echo(
+            f"\ndone — relabeled={result['labeled']} kept={result.get('kept', 0)} "
+            f"skipped={result['skipped']} remaining={result['remaining']}"
+        )
+    else:
+        typer.echo(
+            f"\ndone — labeled={result['labeled']} skipped={result['skipped']} "
+            f"remaining={result['remaining']}"
+        )
 
 
 @app.command()

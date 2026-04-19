@@ -284,6 +284,170 @@ def test_label_disagreements_queue_only_includes_category_mismatches(tmp_path: P
     assert "cost_complaint" in echoed
 
 
+def test_label_reconsider_queue_filters_by_category_and_urgency(tmp_path: Path) -> None:
+    root, db_path = _seed(tmp_path, n_items=3)
+    labels_file = ensure_labels_file("demo", projects_root=root)
+
+    # Items 100/101/102 each labeled differently.
+    append_label(
+        labels_file,
+        make_entry(item_id="hackernews:100", category="self_host_intent", urgency=9, note=None),
+    )
+    append_label(
+        labels_file,
+        make_entry(item_id="hackernews:101", category="self_host_intent", urgency=4, note=None),
+    )
+    append_label(
+        labels_file,
+        make_entry(item_id="hackernews:102", category="cost_complaint", urgency=8, note=None),
+    )
+
+    # --reconsider --category self_host_intent --urgency-min 7
+    # should yield only item 100 (u=9). Item 101 fails urgency filter;
+    # 102 fails category filter.
+    script = _Script(["q"])  # quit before doing anything
+    result = run_label(
+        "demo",
+        db_path,
+        root,
+        source=None,
+        randomize=False,
+        reconsider=True,
+        reconsider_category="self_host_intent",
+        reconsider_urgency_min=7,
+        input_fn=script.input,
+        echo_fn=script.echo,
+    )
+    assert result["total"] == 1
+
+
+def test_label_reconsider_enter_keeps_current_and_does_not_append(tmp_path: Path) -> None:
+    """Enter = keep-current. labeled.jsonl must be unchanged."""
+    root, db_path = _seed(tmp_path, n_items=1)
+    labels_file = ensure_labels_file("demo", projects_root=root)
+    append_label(
+        labels_file,
+        make_entry(item_id="hackernews:100", category="self_host_intent", urgency=8, note=None),
+    )
+    before = labels_file.read_text(encoding="utf-8")
+
+    script = _Script(["", "q"])  # Enter → keep; then q
+    result = run_label(
+        "demo",
+        db_path,
+        root,
+        source=None,
+        randomize=False,
+        reconsider=True,
+        reconsider_category="self_host_intent",
+        input_fn=script.input,
+        echo_fn=script.echo,
+    )
+    assert result["labeled"] == 0  # no relabels
+    assert result["kept"] == 1
+    # File content is byte-identical — no new line appended.
+    assert labels_file.read_text(encoding="utf-8") == before
+
+
+def test_label_reconsider_relabel_appends_preserving_history(tmp_path: Path) -> None:
+    """Relabeling appends a new entry; the original label is retained
+    in the JSONL file for audit."""
+    root, db_path = _seed(tmp_path, n_items=1)
+    labels_file = ensure_labels_file("demo", projects_root=root)
+    original = make_entry(
+        item_id="hackernews:100",
+        category="self_host_intent",
+        urgency=9,
+        note="first take",
+    )
+    append_label(labels_file, original)
+
+    script = _Script(
+        [
+            # Relabel: category_id 'off_topic' (or its number).
+            "off_topic",
+            # Urgency: empty input → use default (current = 9). Then
+            # prompt for note.
+            "",
+            "re-examined under sharper taxonomy",
+            "q",
+        ]
+    )
+    result = run_label(
+        "demo",
+        db_path,
+        root,
+        source=None,
+        randomize=False,
+        reconsider=True,
+        reconsider_category="self_host_intent",
+        input_fn=script.input,
+        echo_fn=script.echo,
+    )
+    assert result["labeled"] == 1  # one relabel
+    assert result["kept"] == 0
+
+    # File now has BOTH entries — append-only.
+    entries = iter_label_entries(labels_file)
+    assert len(entries) == 2
+    cats = [e.category for e in entries]
+    assert cats == ["self_host_intent", "off_topic"]
+    # Default urgency carried over.
+    assert entries[1].urgency == 9
+    assert entries[1].note == "re-examined under sharper taxonomy"
+    # Latest wins under the resolve-effective helper's logic.
+    latest = max(entries, key=lambda e: e.labeled_at)
+    assert latest.category == "off_topic"
+
+
+def test_label_reconsider_urgency_override_accepted(tmp_path: Path) -> None:
+    root, db_path = _seed(tmp_path, n_items=1)
+    labels_file = ensure_labels_file("demo", projects_root=root)
+    append_label(
+        labels_file,
+        make_entry(item_id="hackernews:100", category="self_host_intent", urgency=9, note=None),
+    )
+
+    # Relabel to off_topic with explicit urgency=2 (not the default 9).
+    script = _Script(["off_topic", "2", "", "q"])
+    run_label(
+        "demo",
+        db_path,
+        root,
+        source=None,
+        randomize=False,
+        reconsider=True,
+        reconsider_category="self_host_intent",
+        input_fn=script.input,
+        echo_fn=script.echo,
+    )
+    entries = iter_label_entries(labels_file)
+    latest = max(entries, key=lambda e: e.labeled_at)
+    assert latest.category == "off_topic"
+    assert latest.urgency == 2
+
+
+def test_label_reconsider_and_disagreements_are_mutually_exclusive(tmp_path: Path) -> None:
+    import typer as _typer
+
+    root, db_path = _seed(tmp_path, n_items=1)
+
+    import pytest
+
+    with pytest.raises(_typer.BadParameter):
+        run_label(
+            "demo",
+            db_path,
+            root,
+            source=None,
+            randomize=False,
+            reconsider=True,
+            disagreements_for_version="v1",
+            input_fn=lambda _prompt="": "q",
+            echo_fn=lambda _m="": None,
+        )
+
+
 def test_label_disagreements_relabel_appends_new_entry(tmp_path: Path) -> None:
     root, db_path = _seed(tmp_path, n_items=1)
     labels_file = ensure_labels_file("demo", projects_root=root)
