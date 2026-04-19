@@ -6,38 +6,59 @@
 #
 # For a fork: replace these categories with ones that match your ICP.
 
-version: 1
+version: 2
 
 categories:
   - id: cost_complaint
     label: "Observability cost complaint"
     description: >
-      Actively complaining about the cost of their observability stack
-      (Datadog, New Relic, Grafana Cloud, etc.).
+      Author expresses specific pain about the cost of their observability
+      vendor (Datadog, New Relic, Grafana Cloud). Requires a personal pain
+      signal, not just pricing commentary.
   - id: self_host_intent
     label: "Self-host Prometheus intent"
     description: >
-      Asking about or actively evaluating running their own Prometheus
-      with durable storage.
+      Author is actively evaluating or asking how to run their own
+      Prometheus-compatible storage. Describing someone else's architecture
+      or the landscape in general does not qualify.
   - id: competitor_pain
     label: "Competitor operational pain"
     description: >
-      Complaining about Mimir, Thanos, Cortex, VictoriaMetrics
-      operational complexity.
+      Author is experiencing operational pain with Mimir, Thanos, Cortex,
+      or VictoriaMetrics. Passing mentions and feature discussion do not
+      qualify.
+  - id: active_practitioner
+    label: "Active observability practitioner"
+    description: >
+      Author demonstrates deep, first-hand knowledge of observability
+      tooling and the observability ecosystem — running, having run, or
+      making active decisions about their monitoring/metrics/logging
+      stack. Shares opinions on specific tools (Datadog, Prometheus,
+      Mimir, Thanos, VictoriaMetrics, Grafana, etc.) informed by
+      operational experience. May or may not be currently self-hosting.
+      Not shopping for a new solution (that would be self_host_intent)
+      and not expressing acute pain (that would be cost_complaint or
+      competitor_pain). Good for relationship-building, product
+      feedback, and community-building; not a direct sales opportunity.
   - id: neutral_discussion
     label: "Neutral topic discussion"
     description: >
-      General discussion of the topic space, not a pain point or active
-      evaluation.
+      IS about the observability / Prometheus / metrics-storage space,
+      but shows no specific pain point, buying signal, or active
+      evaluation. General opinion, news, or casual conversation.
   - id: tutorial_or_marketing
     label: "Tutorial or vendor marketing"
     description: >
-      Content produced to teach or promote rather than to discuss pain.
+      Produced to teach or promote rather than to discuss real pain.
+      Vendor blog posts, how-to guides, launch announcements, and
+      conference talks belong here even when they mention the above
+      categories.
   - id: off_topic
     label: "Off topic"
     description: >
-      Matched our queries but isn't actually relevant to the problem
-      space.
+      Not about the observability / Prometheus / metrics-storage space,
+      even if a search term matched. Crypto posts, unrelated job
+      listings, or tools that share a name with our keywords belong here.
 
 urgency_scale:
   - range: [0, 3]

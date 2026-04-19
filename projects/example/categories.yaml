@@ -6,7 +6,7 @@
 #
 # For a fork: replace these categories with ones that match your ICP.
 
-version: 1
+version: 2
 
 categories:
   - id: cost_complaint
@@ -24,6 +24,19 @@ categories:
     description: >
       Complaining about Mimir, Thanos, Cortex, VictoriaMetrics
       operational complexity.
+  - id: active_practitioner
+    label: "Active observability practitioner"
+    description: >
+      Author demonstrates deep, first-hand knowledge of observability
+      tooling and the observability ecosystem — running, having run, or
+      making active decisions about their monitoring/metrics/logging
+      stack. Shares opinions on specific tools (Datadog, Prometheus,
+      Mimir, Thanos, VictoriaMetrics, Grafana, etc.) informed by
+      operational experience. May or may not be currently self-hosting.
+      Not shopping for a new solution (that would be self_host_intent)
+      and not expressing acute pain (that would be cost_complaint or
+      competitor_pain). Good for relationship-building, product
+      feedback, and community-building; not a direct sales opportunity.
   - id: neutral_discussion
     label: "Neutral topic discussion"
     description: >
