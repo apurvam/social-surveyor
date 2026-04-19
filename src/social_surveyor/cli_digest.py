@@ -1,0 +1,313 @@
+"""`social-surveyor digest` — build and send the daily Slack digest.
+
+Three modes share this command:
+
+- **Slack mode** (default): build the digest from alerts in the last
+  ``window_hours`` and POST to the digest webhook. Marks digest-channel
+  alerts as sent so tomorrow's run doesn't re-include them.
+- **``--dry-run``**: build the Block Kit payload and print the JSON to
+  stdout. No Slack call, no DB state change. The JSON can be pasted
+  into Slack's Block Kit Builder for formatting review.
+- **``--category <cat>``**: skip Slack entirely. Print a full listing
+  of items in that category to stdout, respecting ``--since`` and
+  ``--limit``. This is the inspection command the main digest's
+  overflow hint points to.
+
+Cost and accuracy footer numbers come from the api_usage table + the
+labels file (for total_labeled) + an optional last-eval JSON export
+(for accuracy_pct). Missing any piece is fine — the footer degrades
+gracefully.
+"""
+
+from __future__ import annotations
+
+import json
+from datetime import UTC, datetime, timedelta
+from pathlib import Path
+from typing import Any
+
+import typer
+
+from .cli_eval import HAIKU_INPUT_USD_PER_MTOK, HAIKU_OUTPUT_USD_PER_MTOK
+from .config import ConfigError, load_categories, load_routing_config
+from .labeling import count_labeled_ids, labels_path
+from .notifier import (
+    DigestStats,
+    NotifierConfig,
+    NotifierItem,
+    build_digest,
+    post_to_slack,
+)
+from .secrets import SecretNotFoundError, resolve_secret
+from .storage import Storage
+
+
+def run_digest(
+    project: str,
+    db_path: Path,
+    projects_root: Path,
+    *,
+    dry_run: bool,
+    category: str | None = None,
+    since: datetime | None = None,
+    limit: int | None = None,
+    sv_command: str = "social-surveyor",
+    echo_fn: Any = typer.echo,
+    http_client: Any = None,
+) -> dict[str, Any]:
+    """Build and (optionally) post the daily digest.
+
+    Returns a result dict for programmatic callers (tests, scheduler).
+    """
+    try:
+        routing_cfg = load_routing_config(project, projects_root=projects_root)
+    except ConfigError as e:
+        raise typer.BadParameter(str(e)) from None
+
+    if not db_path.is_file():
+        raise typer.BadParameter(f"no DB at {db_path} yet — run a poll first")
+
+    window_start = since or (datetime.now(UTC) - timedelta(hours=routing_cfg.digest.window_hours))
+
+    # Load category labels from categories.yaml so the digest can
+    # show human-friendly category names ("Observability cost
+    # complaint") instead of snake_case ids.
+    try:
+        categories = load_categories(project, projects_root=projects_root)
+        category_labels = {c.id: c.label for c in categories.categories}
+    except ConfigError:
+        # Categories missing is a different error path (classifier
+        # can't load either); degrade to empty map so the digest
+        # still ships with id-form labels.
+        category_labels = {}
+
+    notifier_cfg = NotifierConfig(
+        project=project,
+        sv_command=sv_command,
+        category_labels=category_labels,
+    )
+
+    with Storage(db_path) as db:
+        # Category-inspection mode: stdout only, never Slack. Keeps the
+        # Slack channel quiet while the operator browses.
+        if category is not None:
+            return _run_category_inspection(
+                db,
+                category=category,
+                since=window_start,
+                limit=limit,
+                echo_fn=echo_fn,
+            )
+
+        items = _collect_digest_items(db, routing_cfg, window_start=window_start)
+        stats = _compute_digest_stats(db, project, projects_root, window_start=window_start)
+
+        payload = build_digest(items, stats, notifier_cfg)
+
+        if dry_run:
+            echo_fn(json.dumps(payload, indent=2, default=str))
+            return {
+                "posted": False,
+                "items": len(items),
+                "payload": payload,
+            }
+
+        try:
+            webhook_url = resolve_secret(routing_cfg.digest.webhook_secret)
+        except SecretNotFoundError as e:
+            raise typer.BadParameter(str(e)) from None
+
+        post_to_slack(payload, webhook_url, client=http_client)
+
+        # Mark every digest-channel alert we just rendered as sent so
+        # the next digest doesn't duplicate. Immediate-channel alerts
+        # keep their existing sent_at.
+        sent_at = datetime.now(UTC)
+        marked = 0
+        for row in db.list_alerts_in_window(
+            channel="digest",
+            since=window_start,
+            include_unsent=True,
+        ):
+            if row.get("sent_at") is None:
+                db.mark_alert_sent(int(row["alert_id"]), sent_at)
+                marked += 1
+
+    echo_fn(f"posted digest: {len(items)} items, {marked} digest-channel alerts marked sent")
+    return {
+        "posted": True,
+        "items": len(items),
+        "marked_sent": marked,
+    }
+
+
+# --- collection ---------------------------------------------------------------
+
+
+def _collect_digest_items(
+    db: Storage,
+    routing_cfg: Any,
+    *,
+    window_start: datetime,
+) -> list[NotifierItem]:
+    """Pull items for both the alerted-earlier and category sections.
+
+    - Alerted-earlier: ``channel='immediate'`` alerts with
+      ``sent_at >= window_start``.
+    - Category sections: ``channel='digest'`` alerts in the window
+      (sent or not). Silenced items are hidden *unless* their silence
+      is within the window, in which case they render with a marker.
+    """
+    since_silence = window_start
+    silenced_in_window = db.silenced_since(since_silence)
+
+    alerted_rows = db.list_alerts_in_window(
+        channel="immediate",
+        since=window_start,
+        include_unsent=False,
+    )
+    digest_rows = db.list_alerts_in_window(
+        channel="digest",
+        since=window_start,
+        include_unsent=True,
+    )
+
+    items: list[NotifierItem] = []
+    for row in alerted_rows:
+        items.append(_row_to_notifier_item(row, alerted=True))
+
+    for row in digest_rows:
+        item_id = row["item_id"]
+        is_silenced_now = db.is_silenced(item_id)
+        if is_silenced_now and item_id not in silenced_in_window:
+            # Older silence — hide this item entirely. The user
+            # already decided they don't want to see it; don't spam
+            # them by re-litigating with the marker.
+            continue
+        items.append(
+            _row_to_notifier_item(
+                row,
+                alerted=False,
+                silenced=is_silenced_now,
+            )
+        )
+
+    return items
+
+
+def _row_to_notifier_item(
+    row: dict[str, Any],
+    *,
+    alerted: bool,
+    silenced: bool = False,
+) -> NotifierItem:
+    return NotifierItem(
+        item_id=row["item_id"],
+        source=row["source"],
+        category=row["category"],
+        urgency=int(row["urgency"]),
+        title=row.get("title") or "",
+        body=row.get("body"),
+        author=row.get("author"),
+        url=row.get("url"),
+        created_at=row["created_at"],
+        reasoning=row.get("reasoning"),
+        alerted_at=row.get("sent_at") if alerted else None,
+        silenced=silenced,
+    )
+
+
+# --- stats --------------------------------------------------------------------
+
+
+def _compute_digest_stats(
+    db: Storage,
+    project: str,
+    projects_root: Path,
+    *,
+    window_start: datetime,
+) -> DigestStats:
+    """Compute cost + accuracy footer data. Degrades gracefully."""
+    today_start = datetime.now(UTC).replace(hour=0, minute=0, second=0, microsecond=0)
+    haiku_in, haiku_out = db.sum_api_tokens("anthropic", today_start)
+    haiku_cost = (
+        haiku_in / 1_000_000 * HAIKU_INPUT_USD_PER_MTOK
+        + haiku_out / 1_000_000 * HAIKU_OUTPUT_USD_PER_MTOK
+    )
+    x_reads = db.sum_api_usage("x", today_start)
+    # $0.005 per X read is the pay-per-use tier price as of Session 2.5.
+    # If the price moves we update here and in the X source's cost-cap.
+    x_cost = x_reads * 0.005
+
+    total_labeled = count_labeled_ids(labels_path(project, projects_root=projects_root))
+    accuracy_pct = _latest_accuracy_pct(projects_root / project)
+
+    return DigestStats(
+        day=datetime.now(UTC).date(),
+        haiku_cost_usd=haiku_cost,
+        x_cost_usd=x_cost,
+        total_labeled=total_labeled,
+        accuracy_pct=accuracy_pct,
+    )
+
+
+def _latest_accuracy_pct(project_dir: Path) -> float | None:
+    """Scan the project dir for an eval export JSON and return its accuracy.
+
+    We don't persist eval results in the DB today — they're written
+    as JSON exports by ``eval --export``. The digest footer reads
+    those opportunistically. If none exist, the footer just omits
+    the accuracy figure.
+    """
+    exports = sorted(project_dir.glob("eval_*.json"), reverse=True)
+    if not exports:
+        return None
+    try:
+        data = json.loads(exports[0].read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    overall = data.get("metrics", {}).get("overall_accuracy", {})
+    acc = overall.get("accuracy")
+    return acc * 100 if isinstance(acc, (int, float)) else None
+
+
+# --- category inspection ------------------------------------------------------
+
+
+def _run_category_inspection(
+    db: Storage,
+    *,
+    category: str,
+    since: datetime,
+    limit: int | None,
+    echo_fn: Any,
+) -> dict[str, Any]:
+    """Print every item in ``category`` within the window to stdout."""
+    rows_immediate = db.list_alerts_in_window(
+        channel="immediate", since=since, include_unsent=False
+    )
+    rows_digest = db.list_alerts_in_window(channel="digest", since=since, include_unsent=True)
+    rows = [r for r in (rows_immediate + rows_digest) if r["category"] == category]
+    rows.sort(
+        key=lambda r: (-(int(r["urgency"])), -(r["created_at"].timestamp())),
+    )
+    if limit is not None:
+        rows = rows[:limit]
+
+    echo_fn(f"category={category}  items={len(rows)}  since={since.isoformat()}")
+    echo_fn("-" * 72)
+    for r in rows:
+        title = (r.get("title") or "(no title)")[:100]
+        author = r.get("author") or "unknown"
+        echo_fn(f"u={r['urgency']}  {r['item_id']}  [{r['source']}]  {title!r} by {author}")
+        url = r.get("url")
+        if url:
+            echo_fn(f"    {url}")
+    return {
+        "posted": False,
+        "items": len(rows),
+        "category": category,
+    }
+
+
+__all__ = ["run_digest"]

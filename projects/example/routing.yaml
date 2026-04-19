@@ -1,0 +1,31 @@
+# Routing configuration for a project.
+#
+# - immediate.alert_worthy_categories + threshold_urgency: the two
+#   conditions a classification must meet to fire an immediate Slack
+#   alert. Everything else goes to the daily digest.
+# - Webhook URLs live in env vars (or SSM in prod). This file names
+#   them; it never contains the URLs themselves.
+# - cost_caps: hard daily ceilings. Session 4 parses them; full
+#   enforcement is a follow-on (X already has its own daily_read_cap).
+
+version: 1
+
+immediate:
+  threshold_urgency: 7
+  alert_worthy_categories:
+    - cost_complaint
+    - self_host_intent
+    - competitor_pain
+  webhook_secret: EXAMPLE_SLACK_WEBHOOK_IMMEDIATE
+
+digest:
+  schedule:
+    hour: 9
+    minute: 0
+    timezone: "America/Los_Angeles"
+  webhook_secret: EXAMPLE_SLACK_WEBHOOK_DIGEST
+  window_hours: 24
+
+cost_caps:
+  daily_haiku_tokens: 500000
+  daily_x_reads: 2000

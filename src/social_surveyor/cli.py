@@ -14,17 +14,21 @@ from dotenv import load_dotenv
 
 from . import __version__
 from .cli_classify import run_classify
+from .cli_digest import run_digest
 from .cli_eval import (
     HAIKU_INPUT_USD_PER_MTOK,
     HAIKU_OUTPUT_USD_PER_MTOK,
     run_eval,
 )
 from .cli_explain import run_explain
-from .cli_label import run_label
+from .cli_ingest import run_ingest
+from .cli_label import run_label, run_label_item
+from .cli_route import run_route
 from .cli_setup import run_setup
+from .cli_silence import run_silence
 from .cli_stats import run_stats
 from .cli_triage import run_triage
-from .config import ConfigError, ProjectConfig, load_project_config
+from .config import ConfigError, ProjectConfig, load_project_config, load_routing_config
 from .log_config import configure_logging
 from .sources.base import Source, SourceInitError
 from .sources.github import GitHubSource
@@ -144,6 +148,51 @@ def _print_json(data: object) -> None:
     typer.echo(json.dumps(data, default=str))
 
 
+def run_poll(
+    *,
+    project: str,
+    projects_root: Path = Path("projects"),
+    source: str | None = None,
+) -> None:
+    """Poll configured sources for ``project``.
+
+    Extracted from the ``poll`` CLI command so the scheduler can call
+    the same function without going through typer. A failure in one
+    source (e.g. GitHub rate limit) is logged but doesn't stop the
+    remaining sources.
+    """
+    try:
+        cfg = load_project_config(project, projects_root=projects_root)
+    except ConfigError as e:
+        raise typer.BadParameter(str(e)) from None
+    names = _select_source_names(cfg, source)
+
+    real_db = Storage(_db_path(project))
+    try:
+        for name in names:
+            src = _build_source(name, cfg, real_db)
+            try:
+                items = src.fetch()
+            except Exception as exc:
+                log.exception(
+                    "poll.source.failed",
+                    project=project,
+                    source=src.name,
+                    error=repr(exc),
+                )
+                continue
+            new = sum(1 for i in items if real_db.upsert_item(i))
+            log.info(
+                "poll.done",
+                project=project,
+                source=src.name,
+                fetched=len(items),
+                new=new,
+            )
+    finally:
+        real_db.close()
+
+
 @app.command()
 def poll(
     project: Annotated[str, typer.Option("--project", help="Project name.")],
@@ -175,30 +224,7 @@ def poll(
         _run_dry_run(cfg, names, project=project)
         return
 
-    real_db = Storage(_db_path(project))
-    try:
-        for name in names:
-            src = _build_source(name, cfg, real_db)
-            try:
-                items = src.fetch()
-            except Exception as exc:
-                log.exception(
-                    "poll.source.failed",
-                    project=project,
-                    source=src.name,
-                    error=repr(exc),
-                )
-                continue
-            new = sum(1 for i in items if real_db.upsert_item(i))
-            log.info(
-                "poll.done",
-                project=project,
-                source=src.name,
-                fetched=len(items),
-                new=new,
-            )
-    finally:
-        real_db.close()
+    run_poll(project=project, source=source)
 
 
 def _run_dry_run(cfg: ProjectConfig, names: list[str], *, project: str) -> None:
@@ -434,11 +460,15 @@ def label(
             ),
         ),
     ] = False,
-    reconsider_category: Annotated[
+    category: Annotated[
         str | None,
         typer.Option(
             "--category",
-            help="Filter --reconsider queue to items currently labeled as this category.",
+            help=(
+                "With --item-id, set the label category non-interactively. "
+                "With --reconsider, filter the queue to items currently "
+                "labeled as this category. Invalid without either."
+            ),
         ),
     ] = None,
     urgency_min: Annotated[
@@ -459,13 +489,76 @@ def label(
             help="Filter --reconsider queue to items whose current urgency is <= this.",
         ),
     ] = None,
+    item_id: Annotated[
+        str | None,
+        typer.Option(
+            "--item-id",
+            help=(
+                "Label one specific item by canonical id ({source}:{platform_id}). "
+                "Interactive unless --category and --urgency are also given."
+            ),
+        ),
+    ] = None,
+    label_urgency: Annotated[
+        int | None,
+        typer.Option(
+            "--urgency",
+            min=0,
+            max=10,
+            help="With --item-id, set the urgency (0-10) non-interactively.",
+        ),
+    ] = None,
+    label_note: Annotated[
+        str | None,
+        typer.Option(
+            "--note",
+            help="With --item-id, attach an optional note.",
+        ),
+    ] = None,
 ) -> None:
     """Walk through unlabeled items and record category + urgency + optional note.
 
     Labels append to projects/<project>/evals/labeled.jsonl per decision
-    so Ctrl-C loses at most one label. `b` undoes the most recent label.
+    so Ctrl-C loses at most one label. Use --item-id to label a specific
+    item (e.g. from a Slack alert's copy-paste line); a relabel appends
+    a new entry rather than overwriting, and the latest entry wins.
     """
+    # --urgency / --note only make sense alongside --item-id. --category
+    # is overloaded: it's either the target label (with --item-id) or
+    # the reconsider-queue filter (with --reconsider). Reject ambiguous
+    # combinations up-front rather than letting the wrong mode eat it.
+    if item_id is None:
+        if label_urgency is not None:
+            raise typer.BadParameter("--urgency requires --item-id")
+        if label_note is not None:
+            raise typer.BadParameter("--note requires --item-id")
+        if category is not None and not reconsider:
+            raise typer.BadParameter(
+                "--category requires --item-id (target label) or --reconsider (queue filter)"
+            )
+    else:
+        if disagreements or reconsider:
+            raise typer.BadParameter(
+                "--item-id is mutually exclusive with --disagreements and --reconsider"
+            )
+
     _load_or_exit(project)
+
+    if item_id is not None:
+        try:
+            run_label_item(
+                project,
+                _db_path(project),
+                Path("projects"),
+                item_id=item_id,
+                category=category,
+                urgency=label_urgency,
+                note=label_note,
+            )
+        except typer.BadParameter as e:
+            typer.echo(str(e), err=True)
+            raise typer.Exit(code=1) from None
+        return
     if not resume:
         # Legacy API kept so tests can exercise both paths; the queue
         # builder still uses the labeled-ids set, so --no-resume is
@@ -498,7 +591,7 @@ def label(
             randomize=randomize,
             disagreements_for_version=disagreements_for_version,
             reconsider=reconsider,
-            reconsider_category=reconsider_category,
+            reconsider_category=category,
             reconsider_urgency_min=urgency_min,
             reconsider_urgency_max=urgency_max,
         )
@@ -515,6 +608,35 @@ def label(
             f"\ndone — labeled={result['labeled']} skipped={result['skipped']} "
             f"remaining={result['remaining']}"
         )
+
+
+@app.command()
+def silence(
+    project: Annotated[str, typer.Option("--project", help="Project name.")],
+    item_id: Annotated[
+        str,
+        typer.Option(
+            "--item-id",
+            help="Canonical id ({source}:{platform_id}) of the item to silence.",
+        ),
+    ],
+) -> None:
+    """Stop alerting on a specific item.
+
+    Silence is non-teaching: it filters the router but does not update
+    labeled.jsonl. Use `label --item-id` instead when the classifier's
+    judgment was wrong.
+
+    Silencing is permanent. To reverse a silence, run:
+
+        sqlite3 data/<project>.db "DELETE FROM silenced_items WHERE item_id='<id>'"
+    """
+    _load_or_exit(project)
+    try:
+        run_silence(project, _db_path(project), item_id=item_id)
+    except typer.BadParameter as e:
+        typer.echo(str(e), err=True)
+        raise typer.Exit(code=1) from None
 
 
 @app.command()
@@ -602,6 +724,17 @@ def eval(
             ),
         ),
     ] = False,
+    since: Annotated[
+        str | None,
+        typer.Option(
+            "--since",
+            help=(
+                "ISO-8601 date (YYYY-MM-DD). Restrict the eval set to items "
+                "labeled on or after this date. Useful for drift detection: "
+                "'how is v3 doing on items I labeled this month?'"
+            ),
+        ),
+    ] = None,
 ) -> None:
     """Score the classifier against labeled.jsonl.
 
@@ -611,6 +744,14 @@ def eval(
     eval; cold start hits ~2s per Haiku call. ``--re-score`` skips the
     classifier entirely and reports missing-cache items as excluded.
     """
+    since_dt: datetime | None = None
+    if since is not None:
+        try:
+            since_dt = datetime.fromisoformat(since).replace(tzinfo=UTC)
+        except ValueError:
+            typer.echo(f"--since must be ISO-8601 (YYYY-MM-DD), got {since!r}", err=True)
+            raise typer.Exit(code=1) from None
+
     try:
         run_eval(
             project,
@@ -620,7 +761,208 @@ def eval(
             verbose=verbose,
             export_path=export,
             re_score=re_score,
+            since=since_dt,
         )
+    except typer.BadParameter as e:
+        typer.echo(str(e), err=True)
+        raise typer.Exit(code=1) from None
+
+
+@app.command()
+def run(
+    project: Annotated[str, typer.Option("--project", help="Project name.")],
+    poll_interval_minutes: Annotated[
+        int,
+        typer.Option("--poll-interval-minutes", min=1, help="How often to poll sources."),
+    ] = 10,
+    classify_interval_minutes: Annotated[
+        int,
+        typer.Option(
+            "--classify-interval-minutes",
+            min=1,
+            help="How often to classify unclassified items.",
+        ),
+    ] = 10,
+    route_interval_minutes: Annotated[
+        int,
+        typer.Option(
+            "--route-interval-minutes",
+            min=1,
+            help="How often to route classifications and post immediate alerts.",
+        ),
+    ] = 10,
+) -> None:
+    """Start the long-running pipeline: poll / classify / route / digest.
+
+    Blocking foreground process. In production, systemd wraps this
+    (Session 5). Locally, Ctrl-C stops it cleanly.
+    """
+    from .scheduler import build_scheduler
+
+    _load_or_exit(project)
+    try:
+        routing_cfg = load_routing_config(project)
+    except ConfigError as e:
+        typer.echo(str(e), err=True)
+        raise typer.Exit(code=2) from None
+
+    db_path = _db_path(project)
+    projects_root = Path("projects")
+
+    # Bind context into zero-arg callables so the scheduler stays a
+    # thin wiring layer.
+    def _poll_job() -> None:
+        run_poll(project=project, projects_root=projects_root)
+
+    def _classify_job() -> None:
+        run_classify(
+            project,
+            db_path,
+            projects_root,
+            item_id=None,
+            limit=None,
+            prompt_version_override=None,
+            dry_run=False,
+        )
+
+    def _route_job() -> None:
+        run_route(project, db_path, projects_root, dry_run=False)
+
+    def _digest_job() -> None:
+        run_digest(project, db_path, projects_root, dry_run=False)
+
+    sched = build_scheduler(
+        project,
+        routing_cfg=routing_cfg,
+        poll_fn=_poll_job,
+        classify_fn=_classify_job,
+        route_fn=_route_job,
+        digest_fn=_digest_job,
+        poll_interval_minutes=poll_interval_minutes,
+        classify_interval_minutes=classify_interval_minutes,
+        route_interval_minutes=route_interval_minutes,
+    )
+
+    typer.echo(
+        f"social-surveyor running for project {project!r} "
+        f"(poll/classify/route every {poll_interval_minutes}m, "
+        f"digest at {routing_cfg.digest.schedule.hour:02d}:"
+        f"{routing_cfg.digest.schedule.minute:02d} "
+        f"{routing_cfg.digest.schedule.timezone}). Ctrl-C to stop."
+    )
+    try:
+        sched.start()
+    except (KeyboardInterrupt, SystemExit):
+        typer.echo("\nstopped.")
+
+
+@app.command()
+def route(
+    project: Annotated[str, typer.Option("--project", help="Project name.")],
+    dry_run: Annotated[
+        bool,
+        typer.Option(
+            "--dry-run",
+            help="Print decisions; don't write alerts rows or POST to Slack.",
+        ),
+    ] = False,
+) -> None:
+    """Route unrouted classifications and send pending immediate alerts.
+
+    Idempotent: classifications with an existing alerts row are skipped.
+    Failed sends leave sent_at=NULL so the next invocation retries.
+    """
+    _load_or_exit(project)
+    try:
+        run_route(
+            project,
+            _db_path(project),
+            Path("projects"),
+            dry_run=dry_run,
+        )
+    except typer.BadParameter as e:
+        typer.echo(str(e), err=True)
+        raise typer.Exit(code=1) from None
+
+
+@app.command()
+def digest(
+    project: Annotated[str, typer.Option("--project", help="Project name.")],
+    dry_run: Annotated[
+        bool,
+        typer.Option(
+            "--dry-run",
+            help="Print the Block Kit JSON to stdout; don't POST to Slack.",
+        ),
+    ] = False,
+    category: Annotated[
+        str | None,
+        typer.Option(
+            "--category",
+            help=(
+                "Skip Slack; print a full listing of this category to stdout. "
+                "Respects --since and --limit. Pointed at by the main "
+                "digest's overflow hint line."
+            ),
+        ),
+    ] = None,
+    since: Annotated[
+        str | None,
+        typer.Option(
+            "--since",
+            help=(
+                "ISO-8601 date (YYYY-MM-DD). Overrides the configured "
+                "window_hours — useful for retrospective digests."
+            ),
+        ),
+    ] = None,
+    limit: Annotated[
+        int | None,
+        typer.Option("--limit", min=1, help="Cap items when using --category."),
+    ] = None,
+) -> None:
+    """Build and send the daily Slack digest (or inspect a category to stdout)."""
+    _load_or_exit(project)
+
+    since_dt: datetime | None = None
+    if since is not None:
+        try:
+            since_dt = datetime.fromisoformat(since).replace(tzinfo=UTC)
+        except ValueError:
+            typer.echo(f"--since must be ISO-8601 (YYYY-MM-DD), got {since!r}", err=True)
+            raise typer.Exit(code=1) from None
+
+    try:
+        run_digest(
+            project,
+            _db_path(project),
+            Path("projects"),
+            dry_run=dry_run,
+            category=category,
+            since=since_dt,
+            limit=limit,
+        )
+    except typer.BadParameter as e:
+        typer.echo(str(e), err=True)
+        raise typer.Exit(code=1) from None
+
+
+@app.command()
+def ingest(
+    project: Annotated[str, typer.Option("--project", help="Project name.")],
+    url: Annotated[
+        str,
+        typer.Option("--url", help="URL of an HN / Reddit / X item to capture."),
+    ],
+) -> None:
+    """Capture a manually-supplied URL: fetch, insert, classify.
+
+    No Slack routing — you already saw the item; no need to re-surface.
+    X ingestion counts against the daily read cap.
+    """
+    _load_or_exit(project)
+    try:
+        run_ingest(project, _db_path(project), Path("projects"), url=url)
     except typer.BadParameter as e:
         typer.echo(str(e), err=True)
         raise typer.Exit(code=1) from None

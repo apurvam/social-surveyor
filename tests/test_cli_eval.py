@@ -420,6 +420,147 @@ def test_eval_re_score_uses_latest_label_against_cached_classification(
     assert result["metrics"]["overall_accuracy"]["accuracy"] == 1.0
 
 
+def test_eval_since_filter_narrows_label_set(tmp_path: Path) -> None:
+    """--since <date> keeps only items labeled on/after the cutoff."""
+    projects_root = _write_project_configs(tmp_path)
+    db_path = tmp_path / "data" / "demo.db"
+    labels_file = labels_path("demo", projects_root=projects_root)
+    labels_file.parent.mkdir(parents=True, exist_ok=True)
+
+    with Storage(db_path) as db:
+        # Two labeled items: one labeled long ago, one labeled today.
+        for suffix in ("old", "new"):
+            _seed_item_and_label(
+                db,
+                labels_file,
+                f"hackernews:{suffix}",
+                title="t",
+                label_category="cost_complaint",
+                label_urgency=8,
+            )
+            _prime_classification(
+                db, f"hackernews:{suffix}", "v1", category="cost_complaint", urgency=8
+            )
+    # Rewrite the "old" label's labeled_at to last year.
+    import json as _json
+
+    lines = labels_file.read_text(encoding="utf-8").splitlines()
+    patched: list[str] = []
+    for line in lines:
+        d = _json.loads(line)
+        if d["item_id"] == "hackernews:old":
+            d["labeled_at"] = datetime(2025, 1, 1, tzinfo=UTC).isoformat()
+        patched.append(_json.dumps(d))
+    labels_file.write_text("\n".join(patched) + "\n", encoding="utf-8")
+
+    # With --since Jan 1 2026, only the "new" label stays in the eval set.
+    result = run_eval(
+        "demo",
+        db_path,
+        projects_root,
+        prompt_version_override=None,
+        verbose=False,
+        export_path=None,
+        since=datetime(2026, 1, 1, tzinfo=UTC),
+        client=FakeClient([]),
+        echo_fn=lambda _m: None,
+        progress_every=0,
+    )
+    # Exactly one item scored; both got classified agreement → 1/1 accuracy.
+    assert result["metrics"]["total_labeled"] == 1
+
+
+def test_eval_since_filter_that_excludes_all_raises(tmp_path: Path) -> None:
+    projects_root = _write_project_configs(tmp_path)
+    db_path = tmp_path / "data" / "demo.db"
+    labels_file = labels_path("demo", projects_root=projects_root)
+    labels_file.parent.mkdir(parents=True, exist_ok=True)
+
+    with Storage(db_path) as db:
+        _seed_item_and_label(
+            db,
+            labels_file,
+            "hackernews:1",
+            title="t",
+            label_category="cost_complaint",
+            label_urgency=8,
+        )
+
+    import pytest as _pytest
+    import typer as _typer
+
+    with _pytest.raises(_typer.BadParameter, match="excluded all"):
+        run_eval(
+            "demo",
+            db_path,
+            projects_root,
+            prompt_version_override=None,
+            verbose=False,
+            export_path=None,
+            since=datetime(2099, 1, 1, tzinfo=UTC),
+            client=FakeClient([]),
+            echo_fn=lambda _m: None,
+            progress_every=0,
+        )
+
+
+def test_eval_export_includes_first_and_last_labeled_at(tmp_path: Path) -> None:
+    """Disagreement records should carry the correction-history
+    timestamps so reviewers can tell "this item was just relabeled" from
+    "this item has been stable but the classifier still disagrees."""
+    projects_root = _write_project_configs(tmp_path)
+    db_path = tmp_path / "data" / "demo.db"
+    labels_file = labels_path("demo", projects_root=projects_root)
+    labels_file.parent.mkdir(parents=True, exist_ok=True)
+
+    with Storage(db_path) as db:
+        _seed_item_and_label(
+            db,
+            labels_file,
+            "hackernews:hist1",
+            title="t",
+            label_category="self_host_intent",
+            label_urgency=8,
+        )
+        # Append a correction with a distinctly-later timestamp.
+        entry = make_entry(
+            item_id="hackernews:hist1",
+            category="cost_complaint",
+            urgency=8,
+            note="reconsidered",
+        )
+        d = entry.model_dump()
+        d["labeled_at"] = datetime(2099, 1, 1, tzinfo=UTC).isoformat()
+        with labels_file.open("a", encoding="utf-8") as f:
+            f.write(json.dumps(d) + "\n")
+
+        # Classifier disagrees with the *effective* (latest) label.
+        _prime_classification(db, "hackernews:hist1", "v1", category="self_host_intent", urgency=8)
+
+    export = tmp_path / "eval.json"
+    run_eval(
+        "demo",
+        db_path,
+        projects_root,
+        prompt_version_override=None,
+        verbose=False,
+        export_path=export,
+        re_score=True,
+        client=FakeClient([]),
+        echo_fn=lambda _m: None,
+        progress_every=0,
+    )
+    data = json.loads(export.read_text())
+    disagreements = data["disagreements"]
+    assert len(disagreements) == 1
+    dis = disagreements[0]
+    assert "first_labeled_at" in dis
+    assert "last_labeled_at" in dis
+    # The two timestamps are distinct for a relabeled item.
+    assert dis["first_labeled_at"] != dis["last_labeled_at"]
+    assert dis["last_labeled_at"].startswith("2099")
+
+
 def test_compute_relabel_impact_ignores_single_entry_items(tmp_path: Path) -> None:
     from social_surveyor.cli_eval import _compute_relabel_impact
 

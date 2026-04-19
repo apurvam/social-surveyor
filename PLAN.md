@@ -279,24 +279,38 @@ This session also introduces a first-run setup wizard that captures required cre
 - Prompt density has diminishing returns. The v2→v3 rule expansion (~1200→~2200 input tokens per call) improved some categories but created a magnet effect (Rule 3a read first + broadly framed → catchall behavior). Future prompt iterations should consider total length as a cost, not just rule correctness.
 - Preregistered predictions aren't about accuracy — magnitude predictions missed consistently — but about surfacing mental models of what the prompt change should do. Disagreements between predicted and actual outcomes are more informative than the numbers themselves.
 
-### Session 4 — Routing, alerts, digest, handling
+### Session 4 — Routing, alerts, digest, correction workflow
 
-**Scope:** Slack integration, urgency-based routing, immediate alerts, daily digest, mark-as-handled loop, explain command.
+**Status:** Complete. Shipped Slack immediate alerts + daily digest + a
+three-command correction loop (`label --item-id`, `silence`, `ingest`).
+Append-only `labeled.jsonl` with latest-wins resolution landed inside
+this session (previously deferred). APScheduler-backed `run` command
+ties poll/classify/route together with a daily digest cron.
 
-- Slack alerts include a copy-pasteable `social-surveyor label --item-id <id>` command as the last line of each alert, so users can correct misclassifications without having to remember item IDs or construct the command manually. See the "Production labeling refinement (deferred)" section for the full rationale.
+**Acceptance — met:**
+- `routing.yaml` schema with pydantic validation + cross-file category id check
+- Slack Block Kit immediate alerts (category-colored attachment) + digest with fixed category ordering and top-5-per-category overflow hint
+- `silence` subcommand replaces the planned `handled` — non-teaching filter on the router, distinct from `label --item-id` which is classifier feedback
+- `digest` with `--dry-run`, `--category` (stdout inspection), `--since` (retrospective)
+- `--dry-run` on `route` and `digest`; `poll` and `classify` already had it
+- Every Slack alert ends with copy-paste correction lines including item id, category placeholder, urgency placeholder, and a silence variant
 
-**Acceptance:**
-- `routing.yaml` schema: immediate threshold, digest time/timezone, channel secret references
-- Slack alerts use Block Kit: title, source, urgency, category, reasoning, URL
-- `social-surveyor handled <item_id>` marks an item as handled; handled items never re-alert even if re-matched
-- `social-surveyor digest --project <n>` produces a formatted daily summary of unalerted classifications in the last 24h, grouped by category, sorted by urgency
-- Digest includes daily cost summary (Haiku tokens + X API usage, if applicable)
-- `social-surveyor explain --item-id <id>` prints: raw item, prefilter result, classifier input, classifier raw output, routing decision
-- `--dry-run` flag on `poll`, `classify`, `digest` — does everything except send to Slack
-- Cost kill-switch: daily caps on Haiku tokens and X reads in `routing.yaml`; pipeline halts and sends an infra alert if exceeded
-- Every Slack alert ends with a copy-pasteable label command that works when pasted directly into the user's terminal.
+**Acceptance — scope-shifted:**
+- `explain --item-id` was pre-existing from Session 3 — not re-touched
+- Cost kill-switch: `cost_caps` parsed into `RoutingConfig`, enforcement deferred. X source already enforces its own `daily_read_cap`; Haiku-tokens enforcement is a small follow-on that doesn't warrant blocking Session 4 alongside the Session 5 infra work.
 
-**Non-goals:** EC2 deployment, CI/CD, author enrichment, Slack interactive buttons (CLI-only for handled).
+**Key design decisions captured:**
+- **Path A (no threading) over Path B (Slack app + bot token).** Incoming webhooks return only `ok` — no message `ts`, no threaded replies. Rather than upgrading to a bot-token app, the digest shows top-5 items per category inline with an overflow hint pointing at `sv digest --category <cat>` for the full stdout listing. Better visual consistency day-to-day (main message is the same shape regardless of volume); the builder functions stay pure so a future upgrade to `chat.postMessage` is surface-level.
+- **`silence` keyed on `item_id`, not `classification_id`.** Silence persists across prompt-version reclassifications. If a new classification under v4 disagrees meaningfully with the silence decision under v3, the user can re-ingest and re-evaluate explicitly — the alternative (surfacing automatically on any new classification) is worse UX than a 10-second `sv ingest` when you want to reconsider.
+- **Alerted-earlier items do NOT duplicate in category sections.** "N items across M categories · K alerted earlier" in the digest header lifts alerted items into their own section; they don't render twice. Reduces the user's attention surface.
+- **`silence` has no reversal command.** Mis-silences are expected to be 1-in-20 of 1-2 silences per week — roughly once every 3-5 months. `sqlite3 DELETE` is sufficient at that frequency. The recovery SQL is advertised in the `silence` help text and the README.
+
+**Non-goals honored:** EC2 deployment (Session 5), eval-set expansion, classifier v4, multi-project testing (opendata only), Slack interactive buttons.
+
+**Follow-on notes for future sessions:**
+- **Path B upgrade to a bot-token Slack app.** If daily use shows the `sv digest --category` inspection command is friction, graduate to a Slack app with a bot token so `chat.postMessage` can thread collapsed-category detail off the main message. The builder functions stay pure; only `post_to_slack` changes surface.
+- **Haiku-tokens cost cap enforcement.** The `cost_caps.daily_haiku_tokens` field is parsed but not yet enforced. Add a pre-classify check in `classifier.py` that sums today's `api_usage` tokens and halts with an infra alert if exceeded. Trivial once needed; deferred until we see a runaway.
+- **`alert_worthy_categories` is already in `routing.yaml`**, closing the hardcoded-in-eval-harness item from Open Questions.
 
 ### Session 5 — Deployment and observability
 

@@ -74,6 +74,34 @@ SCHEMA_STATEMENTS: tuple[str, ...] = (
     "CREATE INDEX IF NOT EXISTS idx_classifications_item_id ON classifications(item_id)",
     "CREATE INDEX IF NOT EXISTS idx_classifications_prompt_version "
     "ON classifications(prompt_version)",
+    # Session 4: user-marked "stop alerting me about this item." Distinct
+    # from label corrections — silencing does NOT teach the classifier.
+    # Keyed on item_id because the silence persists across prompt-version
+    # re-classifications; a new classification under v4 for an item the
+    # user silenced under v3 is still silenced.
+    """
+    CREATE TABLE IF NOT EXISTS silenced_items (
+        item_id     TEXT PRIMARY KEY,
+        silenced_at TEXT NOT NULL
+    )
+    """,
+    # Session 4: routing decisions. One row per (classification, channel).
+    # Created when the router decides where a classification goes;
+    # sent_at is set when the Slack post succeeds. Querying unrouted
+    # classifications = classifications with no alerts row. Querying
+    # pending immediate alerts = channel='immediate' AND sent_at IS NULL.
+    """
+    CREATE TABLE IF NOT EXISTS alerts (
+        id                INTEGER PRIMARY KEY AUTOINCREMENT,
+        item_id           TEXT    NOT NULL,
+        classification_id INTEGER NOT NULL,
+        channel           TEXT    NOT NULL,
+        queued_at         TEXT    NOT NULL,
+        sent_at           TEXT
+    )
+    """,
+    "CREATE INDEX IF NOT EXISTS idx_alerts_channel_sent ON alerts(channel, sent_at)",
+    "CREATE INDEX IF NOT EXISTS idx_alerts_classification ON alerts(classification_id)",
 )
 
 
@@ -544,6 +572,214 @@ class Storage:
             params = (prompt_version, limit)
         rows = self._conn.execute(sql, params).fetchall()
         return [self._row_to_dict(r) for r in rows]
+
+    # --- routing / alerts ------------------------------------------------
+
+    def list_unrouted_classifications(
+        self,
+        *,
+        prompt_version: str | None = None,
+    ) -> list[dict[str, Any]]:
+        """Classifications with no alerts row (under the given version).
+
+        Returned rows include the classification fields plus ``item_id``
+        so routers don't need a second query. Ordered oldest-first so
+        retries and multi-run sessions make deterministic progress.
+        """
+        where = ["NOT EXISTS (SELECT 1 FROM alerts a WHERE a.classification_id = c.id)"]
+        params: list[Any] = []
+        if prompt_version is not None:
+            where.append("c.prompt_version = ?")
+            params.append(prompt_version)
+        clause = " AND ".join(where)
+        rows = self._conn.execute(
+            f"""
+            SELECT c.*
+            FROM classifications c
+            WHERE {clause}
+            ORDER BY c.classified_at ASC, c.id ASC
+            """,
+            tuple(params),
+        ).fetchall()
+        return [self._classification_row_to_dict(r) for r in rows]
+
+    def record_alert(
+        self,
+        *,
+        item_id: str,
+        classification_id: int,
+        channel: str,
+        sent_at: datetime | None = None,
+    ) -> int:
+        """Create an alerts row. Returns the new row id.
+
+        ``sent_at`` is usually None at insert time (the router decides,
+        the sender marks sent). For a one-shot post (e.g. a digest that
+        built and sent atomically) callers pass ``sent_at=now``.
+        """
+        queued_at = _to_iso(datetime.now(UTC))
+        sent_iso = _to_iso(sent_at) if sent_at is not None else None
+        with self._conn:
+            cur = self._conn.execute(
+                """
+                INSERT INTO alerts (item_id, classification_id, channel, queued_at, sent_at)
+                VALUES (?, ?, ?, ?, ?)
+                """,
+                (item_id, classification_id, channel, queued_at, sent_iso),
+            )
+        return int(cur.lastrowid or 0)
+
+    def mark_alert_sent(self, alert_id: int, sent_at: datetime) -> None:
+        with self._conn:
+            self._conn.execute(
+                "UPDATE alerts SET sent_at = ? WHERE id = ?",
+                (_to_iso(sent_at), alert_id),
+            )
+
+    def list_pending_alerts(self, channel: str) -> list[dict[str, Any]]:
+        """Alerts in ``channel`` that haven't been posted yet.
+
+        Joins in the item + classification so the caller can build
+        Slack payloads without additional queries.
+        """
+        rows = self._conn.execute(
+            """
+            SELECT
+                a.id AS alert_id,
+                a.item_id AS item_id,
+                a.queued_at AS queued_at,
+                c.category AS category,
+                c.urgency AS urgency,
+                c.reasoning AS reasoning,
+                c.classified_at AS classified_at,
+                i.source AS source,
+                i.title AS title,
+                i.body AS body,
+                i.author AS author,
+                i.url AS url,
+                i.created_at AS created_at
+            FROM alerts a
+            JOIN classifications c ON a.classification_id = c.id
+            JOIN items i ON i.source = substr(a.item_id, 1, instr(a.item_id, ':') - 1)
+                        AND i.platform_id = substr(a.item_id, instr(a.item_id, ':') + 1)
+            WHERE a.channel = ? AND a.sent_at IS NULL
+            ORDER BY c.classified_at ASC
+            """,
+            (channel,),
+        ).fetchall()
+        out: list[dict[str, Any]] = []
+        for r in rows:
+            d = dict(r)
+            if d.get("created_at"):
+                d["created_at"] = _from_iso(d["created_at"])
+            if d.get("classified_at"):
+                d["classified_at"] = _from_iso(d["classified_at"])
+            if d.get("queued_at"):
+                d["queued_at"] = _from_iso(d["queued_at"])
+            out.append(d)
+        return out
+
+    def list_alerts_in_window(
+        self,
+        *,
+        channel: str,
+        since: datetime,
+        include_unsent: bool = False,
+    ) -> list[dict[str, Any]]:
+        """Alerts on ``channel`` whose sent_at (or queued_at if unsent)
+        falls in ``[since, now]``.
+
+        Used by the digest builder to assemble:
+          - ``channel='immediate'``, ``include_unsent=False``: already-
+            alerted items for the "alerted earlier" section.
+          - ``channel='digest'``, ``include_unsent=True``: items queued
+            for this digest cycle.
+        """
+        since_iso = _to_iso(since)
+        if include_unsent:
+            # Unsent alerts are only relevant if queued in-window; otherwise
+            # a --since <future-date> filter would still return every
+            # unsent alert regardless of when it was queued.
+            where = "a.channel = ? AND ((a.sent_at IS NULL AND a.queued_at >= ?) OR a.sent_at >= ?)"
+            params: tuple[Any, ...] = (channel, since_iso, since_iso)
+        else:
+            where = "a.channel = ? AND a.sent_at IS NOT NULL AND a.sent_at >= ?"
+            params = (channel, since_iso)
+        rows = self._conn.execute(
+            f"""
+            SELECT
+                a.id AS alert_id,
+                a.item_id AS item_id,
+                a.queued_at AS queued_at,
+                a.sent_at AS sent_at,
+                c.category AS category,
+                c.urgency AS urgency,
+                c.reasoning AS reasoning,
+                c.classified_at AS classified_at,
+                i.source AS source,
+                i.title AS title,
+                i.body AS body,
+                i.author AS author,
+                i.url AS url,
+                i.created_at AS created_at
+            FROM alerts a
+            JOIN classifications c ON a.classification_id = c.id
+            JOIN items i ON i.source = substr(a.item_id, 1, instr(a.item_id, ':') - 1)
+                        AND i.platform_id = substr(a.item_id, instr(a.item_id, ':') + 1)
+            WHERE {where}
+            ORDER BY c.urgency DESC, c.classified_at DESC
+            """,
+            params,
+        ).fetchall()
+        out: list[dict[str, Any]] = []
+        for r in rows:
+            d = dict(r)
+            for k in ("created_at", "classified_at", "queued_at", "sent_at"):
+                if d.get(k):
+                    d[k] = _from_iso(d[k])
+            out.append(d)
+        return out
+
+    # --- silenced items --------------------------------------------------
+
+    def silence_item(self, item_id: str) -> bool:
+        """Silence ``item_id``. Idempotent.
+
+        Returns True when the row is newly inserted, False when the item
+        was already silenced. Callers use the return for user messaging
+        ("silenced" vs "was already silenced") — the underlying DB
+        state is the same either way.
+        """
+        with self._conn:
+            cur = self._conn.execute(
+                """
+                INSERT INTO silenced_items (item_id, silenced_at)
+                VALUES (?, ?)
+                ON CONFLICT(item_id) DO NOTHING
+                """,
+                (item_id, _to_iso(datetime.now(UTC))),
+            )
+            return cur.rowcount == 1
+
+    def is_silenced(self, item_id: str) -> bool:
+        row = self._conn.execute(
+            "SELECT 1 FROM silenced_items WHERE item_id = ? LIMIT 1",
+            (item_id,),
+        ).fetchone()
+        return row is not None
+
+    def silenced_since(self, since: datetime) -> set[str]:
+        """Item IDs silenced on or after ``since``.
+
+        Used by the digest to render the 🔕 marker against items
+        silenced within the digest window — older silences are hidden
+        entirely (see Session 4 design notes).
+        """
+        rows = self._conn.execute(
+            "SELECT item_id FROM silenced_items WHERE silenced_at >= ?",
+            (_to_iso(since),),
+        ).fetchall()
+        return {r["item_id"] for r in rows}
 
     # --- helpers ---------------------------------------------------------
 

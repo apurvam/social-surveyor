@@ -210,6 +210,74 @@ class ClassifierConfig(BaseModel):
     backoff_seconds: float = Field(default=2.0, ge=0.0)
 
 
+class ImmediateConfig(BaseModel):
+    """Routing rules for immediate Slack alerts."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    threshold_urgency: int = Field(
+        default=7,
+        ge=0,
+        le=10,
+        description="Items with urgency >= this AND category in alert_worthy_categories alert.",
+    )
+    alert_worthy_categories: list[str] = Field(..., min_length=1)
+    webhook_secret: str = Field(
+        ...,
+        min_length=1,
+        description="Env var name holding the immediate-channel incoming webhook URL.",
+    )
+
+
+class DigestScheduleConfig(BaseModel):
+    """Daily digest schedule (hour/minute/timezone)."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    hour: int = Field(..., ge=0, le=23)
+    minute: int = Field(..., ge=0, le=59)
+    timezone: str = Field(default="UTC", min_length=1)
+
+
+class DigestConfig(BaseModel):
+    """Routing rules for the daily digest."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    schedule: DigestScheduleConfig
+    webhook_secret: str = Field(
+        ...,
+        min_length=1,
+        description="Env var name holding the digest-channel incoming webhook URL.",
+    )
+    window_hours: int = Field(
+        default=24,
+        ge=1,
+        description="Window of classifications to include in the daily digest.",
+    )
+
+
+class CostCapsConfig(BaseModel):
+    """Hard daily ceilings. Session 4 parses these; full enforcement is
+    a follow-on — X already has its own ``daily_read_cap`` today."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    daily_haiku_tokens: int = Field(default=500_000, ge=0)
+    daily_x_reads: int = Field(default=2_000, ge=0)
+
+
+class RoutingConfig(BaseModel):
+    """Top-level routing config (``projects/<n>/routing.yaml``)."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    version: int = Field(default=1, ge=1)
+    immediate: ImmediateConfig
+    digest: DigestConfig
+    cost_caps: CostCapsConfig = Field(default_factory=CostCapsConfig)
+
+
 class ProjectConfig(BaseModel):
     """Aggregated config for a single project.
 
@@ -374,4 +442,53 @@ def load_classifier_config(
             )
         raise ConfigError("\n".join(lines))
 
+    return cfg
+
+
+def load_routing_config(
+    project: str,
+    projects_root: Path | str = "projects",
+) -> RoutingConfig:
+    """Load ``projects/<project>/routing.yaml``.
+
+    Cross-file validation (that ``alert_worthy_categories`` are real
+    category ids) happens here so a typo fails loud at load rather
+    than silently routing nothing to the immediate channel.
+    """
+    root = Path(projects_root)
+    project_dir = root / project
+    path = project_dir / "routing.yaml"
+    if not path.is_file():
+        raise ConfigError(
+            f"project '{project}' has no routing.yaml at {path}; "
+            f"copy projects/example/routing.yaml as a starting point"
+        )
+    data = _load_yaml(path)
+    try:
+        cfg = RoutingConfig.model_validate(data)
+    except ValidationError as e:
+        raise ConfigError(_format_validation_error(path, e)) from e
+
+    # Validate alert_worthy_categories against the project's taxonomy.
+    # A typo here would silently drop the item into the digest channel
+    # instead of alerting, which is exactly the wrong kind of bug for
+    # a routing config.
+    categories_path = project_dir / "categories.yaml"
+    if categories_path.is_file():
+        cats_data = _load_yaml(categories_path)
+        try:
+            cats = CategoryConfig.model_validate(cats_data)
+        except ValidationError:
+            # Don't block routing-config load on an invalid categories
+            # file — that gets flagged separately when the classifier
+            # loads. We just skip the cross-check.
+            return cfg
+        valid_ids = {c.id for c in cats.categories}
+        bad = [c for c in cfg.immediate.alert_worthy_categories if c not in valid_ids]
+        if bad:
+            valid_display = ", ".join(sorted(valid_ids))
+            raise ConfigError(
+                f"{path}: immediate.alert_worthy_categories references unknown "
+                f"category ids: {sorted(bad)} (valid: {valid_display})"
+            )
     return cfg

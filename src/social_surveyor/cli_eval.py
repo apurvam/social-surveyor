@@ -46,7 +46,12 @@ from .eval_metrics import (
     stabilization_check,
     stop_criteria,
 )
-from .labeling import LabelEntry, iter_label_entries, labels_path
+from .labeling import (
+    LabelEntry,
+    iter_label_entries,
+    labels_path,
+    resolve_effective_labels,
+)
 from .storage import Storage
 
 log = structlog.get_logger("cli.eval")
@@ -82,6 +87,7 @@ def run_eval(
     verbose: bool,
     export_path: Path | None,
     re_score: bool = False,
+    since: datetime | None = None,
     client: Any | None = None,
     echo_fn: Any = typer.echo,
     progress_every: int = 5,
@@ -113,6 +119,14 @@ def run_eval(
         raise typer.BadParameter(
             f"no labels at {labels_file}; run `social-surveyor label --project {project}`"
         )
+    if since is not None:
+        before = len(effective_labels)
+        effective_labels = [e for e in effective_labels if e.labeled_at >= since]
+        if not effective_labels:
+            raise typer.BadParameter(
+                f"--since {since.date().isoformat()} excluded all {before} labels; "
+                "pick an earlier date or drop --since"
+            )
 
     if not db_path.is_file():
         raise typer.BadParameter(f"no DB at {db_path} yet — run a poll first")
@@ -181,6 +195,7 @@ def run_eval(
     )
 
     if export_path is not None:
+        label_history = _label_history(labels_file)
         _export(
             path=export_path,
             clf_cfg=clf_cfg,
@@ -191,6 +206,7 @@ def run_eval(
             pairs=pairs,
             relabel_impact=relabel_impact,
             re_score=re_score,
+            label_history=label_history,
         )
         echo_fn(f"\nwrote eval export: {export_path}")
 
@@ -489,21 +505,36 @@ def _compute_relabel_impact(path: Path) -> dict[str, Any]:
     }
 
 
+def _label_history(path: Path) -> dict[str, tuple[datetime, datetime]]:
+    """For every labeled item_id, return (first_labeled_at, last_labeled_at).
+
+    Singletons return equal timestamps; relabeled items return distinct
+    ones. Consumed by the export to surface correction-history context
+    alongside each disagreement.
+    """
+    out: dict[str, tuple[datetime, datetime]] = {}
+    for e in iter_label_entries(path):
+        cur = out.get(e.item_id)
+        if cur is None:
+            out[e.item_id] = (e.labeled_at, e.labeled_at)
+        else:
+            first, last = cur
+            out[e.item_id] = (
+                min(first, e.labeled_at),
+                max(last, e.labeled_at),
+            )
+    return out
+
+
 def _load_effective_labels(path: Path) -> list[LabelEntry]:
     """Apply latest-wins per item_id.
 
     Matches PLAN.md's "append-only labeled.jsonl with timestamp
-    precedence" semantics. Duplicate item_ids are collapsed by picking
-    the entry with the latest ``labeled_at``; earlier entries are
-    retained in the file for audit but ignored by the eval harness.
+    precedence" semantics. Delegates to :func:`resolve_effective_labels`;
+    this wrapper exists to keep the call site's intent ("load the eval
+    input set") readable.
     """
-    entries = iter_label_entries(path)
-    latest: dict[str, LabelEntry] = {}
-    for e in entries:
-        prior = latest.get(e.item_id)
-        if prior is None or e.labeled_at > prior.labeled_at:
-            latest[e.item_id] = e
-    return list(latest.values())
+    return list(resolve_effective_labels(iter_label_entries(path)).values())
 
 
 def _apply_version_override(
@@ -770,7 +801,9 @@ def _export(
     pairs: list[EvalPair],
     relabel_impact: dict[str, Any] | None = None,
     re_score: bool = False,
+    label_history: dict[str, tuple[datetime, datetime]] | None = None,
 ) -> None:
+    label_history = label_history or {}
     disagreements = []
     for p in pairs:
         if p.model_category is None:
@@ -781,16 +814,23 @@ def _export(
         # matching review (the primary use case). Long HN comments get
         # the head truncated; the full stored body is still in SQLite.
         body_trunc = p.body[:500] + ("…" if len(p.body) > 500 else "")
-        disagreements.append(
-            {
-                "item_id": p.item_id,
-                "source": p.source,
-                "title": p.title,
-                "body": body_trunc,
-                "human": {"category": p.label_category, "urgency": p.label_urgency},
-                "model": {"category": p.model_category, "urgency": p.model_urgency},
-            }
-        )
+        disagreement: dict[str, Any] = {
+            "item_id": p.item_id,
+            "source": p.source,
+            "title": p.title,
+            "body": body_trunc,
+            "human": {"category": p.label_category, "urgency": p.label_urgency},
+            "model": {"category": p.model_category, "urgency": p.model_urgency},
+        }
+        # Include correction history when available. For items with a
+        # single label these are equal; for items the user has relabeled
+        # the pair exposes the drift.
+        history = label_history.get(p.item_id)
+        if history is not None:
+            first, last = history
+            disagreement["first_labeled_at"] = first.isoformat()
+            disagreement["last_labeled_at"] = last.isoformat()
+        disagreements.append(disagreement)
     # Per-source breakdown is cheap and useful in exports even though
     # the terminal summary doesn't show it — JSON consumers can slice.
     per_source_counts: dict[str, int] = defaultdict(int)
