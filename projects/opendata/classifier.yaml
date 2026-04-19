@@ -2,11 +2,11 @@
 # See projects/example/classifier.yaml for field-by-field documentation.
 
 version: 1
-# v2a = v2's rules running against the post-v2 taxonomy (active_practitioner
-# added in categories.yaml v2). Rules themselves are unchanged from v2; they
-# don't mention active_practitioner yet — teaching the model about the new
-# category happens in v3 after the relabel pass lands.
-prompt_version: "v2a"
+# v3 teaches the model about active_practitioner (new in categories.yaml
+# v2, blind to the v2/v2a prompt) and softens v2's Rule 4 tiebreaker
+# into Rule 5's linguistic-evidence criteria. Rule 3 splits into
+# 3a-3d with explicit precedence. Adds an urgency-independence note.
+prompt_version: "v3"
 
 categories_file: "categories.yaml"
 
@@ -18,11 +18,6 @@ icp_description: |
   considering self-hosting to cut costs but balk at the operational
   complexity of existing solutions (Mimir, Thanos, Cortex).
 
-# Structural decision rules. Bumped to v2 to address v1's dominant
-# failure modes (16 off_topic items mislabeled as neutral_discussion,
-# systematic over-promotion to the alert-worthy categories). Urgency
-# rules intentionally deferred to v3 after we see the category signal
-# stabilize here.
 additional_instructions: |
   Classification rules (apply in order):
 
@@ -33,40 +28,98 @@ additional_instructions: |
        only matched on an incidental keyword, classify as off_topic.
      - A post that lists "Prometheus" or "Datadog" as a skill or tag
        without discussing observability itself is off_topic.
+     - Metaphorical uses of tool names (e.g., "the new Datadog bill but
+       for AI") are off_topic — the post isn't about observability even
+       if the name appears.
      - BUT: a short post that IS about observability still counts as
        in-scope. "Anyone else sick of Datadog pricing?" is in-scope with
        no caveats even though it's brief.
 
   2. If the post IS about the observability space but shows no specific
-     pain, no active evaluation, and no buying signal, classify as
-     neutral_discussion. General opinion, news, or casual conversation
-     belongs here.
+     pain, no active evaluation, no buying signal, and no practitioner
+     depth, classify as neutral_discussion. General opinion, news, or
+     casual conversation belongs here.
 
-  3. Only use the alert-worthy categories (cost_complaint,
-     self_host_intent, competitor_pain) when there is a clear, specific
-     signal. The bar is "this is an engagement opportunity a vendor would
-     want to see," not "this topic came up."
-     - cost_complaint: author expresses a specific personal complaint
-       about observability vendor cost. "Our Datadog bill went from $30k
-       to $80k" passes. "Datadog is known to be expensive" does not.
-     - self_host_intent: author is actively asking about, planning, or
-       currently evaluating running their own Prometheus-compatible
-       storage. Questions ("how do you handle long-term retention?"),
-       evaluations ("we're comparing Mimir vs VictoriaMetrics"), and
-       plans ("we're moving off Datadog next quarter") all qualify.
-       A third-party architecture recap with no first-person stake is
-       tutorial_or_marketing.
-     - competitor_pain: author is experiencing operational pain with
-       Mimir, Thanos, Cortex, or VictoriaMetrics. Casual mentions are
-       not competitor_pain.
+  3. Classify posts authored by observability practitioners (people with
+     first-hand, operational experience with monitoring/metrics tooling)
+     into one of these categories based on the author's stance:
 
-  4. When torn between an alert-worthy category and neutral_discussion,
-     choose neutral_discussion. When torn between neutral_discussion and
-     off_topic, re-check rule 1.
+     a. active_practitioner: author demonstrates deep, first-hand
+        knowledge of observability tooling and shares that knowledge.
+        They run, have run, or make active decisions about their
+        monitoring stack. They share opinions on specific tools
+        (Datadog, Prometheus, Mimir, Thanos, VictoriaMetrics, Grafana,
+        New Relic, Honeycomb, etc.) informed by operational experience.
+        They give advice based on their own practice. They may be happy
+        with their current stack, or migrating, or reflecting on past
+        choices. The key signal is OPERATIONAL DEPTH, not pain or active
+        shopping.
+        Examples of active_practitioner:
+        - "We use VictoriaMetrics and it's been great since 2019"
+        - "If you get serious about Prometheus you'll want Thanos for
+           retention, here's what I learned"
+        - "We evaluated Mimir vs Cortex last year and went with Mimir"
+        - "I run Prometheus + Grafana at my homelab for a buck a month"
+        - "We tried Datadog, moved to self-hosted, now back on Datadog
+           because..."
 
-  (No rule 5 — urgency calibration intentionally deferred to v3 after
-  category gains stabilize. Score urgency using the scale above without
-  second-guessing.)
+     b. cost_complaint: author expresses a specific, personal complaint
+        about their observability vendor's cost. Requires a first-person
+        pain signal. "Our Datadog bill went from $30k to $80k after
+        custom metrics pricing" qualifies. "Datadog is known to be
+        expensive" is active_practitioner or neutral_discussion.
+
+     c. self_host_intent: author is actively shopping for, asking how to
+        set up, or currently evaluating a self-hosted Prometheus-
+        compatible storage solution. The distinguishing signal vs
+        active_practitioner is that they don't have a solution yet —
+        they're asking questions, comparing options, or planning a move.
+        Past evaluations resulting in a current choice are
+        active_practitioner, not self_host_intent. "We evaluated Mimir
+        vs VictoriaMetrics and went with Mimir" is active_practitioner.
+        "We're evaluating Mimir vs VictoriaMetrics for our new cluster"
+        is self_host_intent.
+
+     d. competitor_pain: author is experiencing operational pain with
+        Mimir, Thanos, Cortex, or VictoriaMetrics specifically. Requires
+        a first-person pain signal. "We gave up on Thanos, too
+        complex" qualifies. "Thanos is generally considered complex" is
+        active_practitioner or neutral_discussion.
+
+     When multiple of 3a-3d could apply, the order of precedence is:
+     cost_complaint (explicit money pain) > self_host_intent (active
+     shopping) > competitor_pain (operational pain) > active_practitioner
+     (has a view but no acute signal).
+
+  4. Use tutorial_or_marketing for content produced to teach or promote
+     rather than to discuss the author's own practice. Vendor blog
+     posts, how-to guides, launch announcements, conference talk
+     recaps, and tutorials belong here — even when they mention
+     observability tools in depth. The distinguishing signal vs
+     active_practitioner: tutorials/marketing are explaining a topic TO
+     an audience; active_practitioner items are the author TALKING ABOUT
+     THEMSELVES.
+
+  5. When torn between categories, look for concrete first-person
+     language in the post:
+     - First-person stake ("we ran into / I'm trying to / our team is /
+       we're moving off")
+       → 3a-3d per precedence
+     - Advice grounded in own practice ("we tried X, use Y instead /
+       if you get serious about X, you'll want Y")
+       → active_practitioner
+     - Generic how-to advice ("you should / here's how / consider X")
+       → tutorial_or_marketing
+     - Landscape commentary without first-person ("the industry is
+       moving toward / many people use / X is generally")
+       → neutral_discussion
+     When torn between neutral_discussion and off_topic, re-check rule 1.
+
+  Urgency note: urgency reflects the post's explicit signals (direct
+  questions, stated evaluations, strong pain language, cost numbers,
+  active planning). Score urgency from those signals independently of
+  the category. Do not let category uncertainty suppress urgency, and
+  do not let category confidence inflate urgency.
 
 few_shot_examples: []
 
