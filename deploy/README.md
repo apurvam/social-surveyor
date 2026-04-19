@@ -1,0 +1,235 @@
+# Deploy runbook — social-surveyor on EC2 (Session 5a)
+
+Minimal production deploy: one t4g.micro behind an IAM role, polling
+on cron inside a single Python process, secrets in SSM Parameter
+Store. No CI/CD, no health endpoint, no automated rsync — those come
+in 5a-polish, 5b, and 5c.
+
+If you are reforking this repo for your own project, copy
+`Pulumi.opendata.example.yaml` to `Pulumi.<yourproject>.yaml` and
+substitute your own VPC / subnet / project name everywhere you see
+`opendata` below.
+
+---
+
+## 0. Prerequisites
+
+- AWS CLI configured with credentials that have permission to create
+  EC2 / IAM / SSM resources in the target account.
+- Pulumi CLI (>= 3.100) and a Pulumi Cloud account for state.
+- An existing VPC and public subnet in the target region (or a
+  private subnet with NAT / VPC endpoints for SSM — not the path 5a
+  is wired for).
+- Local `.env` containing the runtime secrets the service needs:
+  `ANTHROPIC_API_KEY`, `OPENDATA_SLACK_WEBHOOK_IMMEDIATE`,
+  `OPENDATA_SLACK_WEBHOOK_DIGEST`, `X_BEARER_TOKEN`, and any other
+  per-source tokens referenced by the project's configs.
+
+All commands below assume you are running them from the repo root
+with `AWS_PROFILE` set to the profile that points at the target
+account.
+
+---
+
+## 1. Configure the Pulumi stack (one-time)
+
+```bash
+cd deploy/pulumi
+cp Pulumi.opendata.example.yaml Pulumi.opendata.yaml
+# edit Pulumi.opendata.yaml: fill in vpc_id, subnet_id, region, project_name
+```
+
+Set up the Python venv Pulumi uses:
+
+```bash
+python3 -m venv venv
+venv/bin/pip install -r requirements.txt
+```
+
+Create the stack (or select if it already exists):
+
+```bash
+pulumi stack select opendata --create
+```
+
+---
+
+## 2. Preview and apply
+
+```bash
+AWS_PROFILE=prod pulumi preview     # eyeball the 8 resources
+AWS_PROFILE=prod pulumi up          # apply
+```
+
+Record the outputs — you'll use `instance_id` and
+`ssm_connect_command` repeatedly.
+
+```bash
+pulumi stack output instance_id
+pulumi stack output ssm_connect_command
+```
+
+---
+
+## 3. Seed SSM Parameter Store (one-time, from the laptop)
+
+From the repo root:
+
+```bash
+AWS_PROFILE=prod deploy/seed-ssm.sh opendata
+```
+
+This reads every `KEY=VALUE` line from `.env` and writes it to SSM
+as `/social-surveyor/opendata/<KEY>` (SecureString, KMS-encrypted
+under `alias/aws/ssm`). Re-run any time the secrets change;
+`--overwrite` is always on.
+
+Verify:
+
+```bash
+AWS_PROFILE=prod aws ssm get-parameters-by-path \
+    --path /social-surveyor/opendata \
+    --query 'Parameters[*].Name' --output table
+```
+
+---
+
+## 4. Connect to the instance
+
+SSM Session Manager (no SSH, no bastion needed):
+
+```bash
+AWS_PROFILE=prod aws ssm start-session \
+    --target "$(cd deploy/pulumi && pulumi stack output instance_id)" \
+    --region us-west-2
+```
+
+The session drops you in as `ssm-user`; `sudo` is permitted.
+
+---
+
+## 5. Provision the instance (on the instance, via SSM)
+
+Clone the repo into the canonical path:
+
+```bash
+sudo mkdir -p /opt/social-surveyor
+sudo chown $(id -u):$(id -g) /opt/social-surveyor
+git clone https://github.com/apurvam/social-surveyor.git /opt/social-surveyor
+```
+
+> For a private repo, use an HTTPS token or a deploy key. The plain
+> public-clone path above is the 5a happy path.
+
+Run the bootstrap script:
+
+```bash
+sudo bash /opt/social-surveyor/deploy/bootstrap-ec2.sh
+```
+
+The bootstrap script installs `uv`, creates the `social-surveyor`
+service user, chowns `/opt/social-surveyor` and
+`/var/lib/social-surveyor`, installs the systemd template unit, and
+drops `/usr/local/bin/social-surveyor-load-env` into place.
+
+---
+
+## 6. Install Python deps, load secrets, start the service
+
+```bash
+# install project deps under the service user
+sudo -u social-surveyor bash -c 'cd /opt/social-surveyor && uv sync'
+
+# pull secrets from SSM into /etc/social-surveyor/opendata.env
+sudo /usr/local/bin/social-surveyor-load-env opendata
+
+# enable and start
+sudo systemctl enable --now social-surveyor@opendata
+```
+
+Follow the logs until you see at least one poll / classify cycle:
+
+```bash
+sudo journalctl -u social-surveyor@opendata -f
+```
+
+---
+
+## 7. First-digest verification
+
+Dry-run the digest (stdout only, no Slack post):
+
+```bash
+sudo -u social-surveyor bash -c \
+    'cd /opt/social-surveyor && \
+     SOCIAL_SURVEYOR_DATA_DIR=/var/lib/social-surveyor/opendata \
+     uv run social-surveyor digest --project opendata --dry-run'
+```
+
+If the Block Kit JSON looks healthy (has items, cost footer populated,
+categories rendered), the 9am cron will do the same thing tomorrow.
+
+To send one immediately to confirm the Slack post renders:
+
+```bash
+sudo -u social-surveyor bash -c \
+    'cd /opt/social-surveyor && \
+     SOCIAL_SURVEYOR_DATA_DIR=/var/lib/social-surveyor/opendata \
+     uv run social-surveyor digest --project opendata'
+```
+
+---
+
+## Rollback
+
+```bash
+cd deploy/pulumi
+AWS_PROFILE=prod pulumi destroy
+```
+
+Destroys everything Pulumi owns: IAM role + policies, instance
+profile, SG, EC2 instance. The EBS volume (`delete_on_termination`)
+goes with the instance. SSM parameters and the Pulumi Cloud state
+survive; clean those up with `aws ssm delete-parameters-by-path` and
+`pulumi stack rm opendata` if you truly want no trace.
+
+---
+
+## Common pitfalls
+
+- **SSM session fails with `TargetNotConnected`.** Give the instance
+  30–60 seconds after `pulumi up` for the snap-packaged SSM agent to
+  register. If it still fails, check that the IAM role is attached
+  (`aws ec2 describe-instances --instance-ids <id> --query '...'`).
+- **`uv sync` stalls on the first run.** It's compiling native wheels
+  (httpx, tenacity, orjson). Give it 2–3 minutes on t4g.micro.
+- **`load-env` writes 0 parameters.** You likely haven't run
+  `seed-ssm.sh` yet, or you're hitting the wrong region / profile
+  on the local machine.
+- **`systemctl status` shows Restart loops with `exit-code=203`.**
+  Almost always a missing `uv` on PATH; confirm `/usr/local/bin/uv`
+  exists and is executable.
+
+---
+
+## Redeploy (5a: manual)
+
+Until 5a-polish lands `deploy.sh`, a redeploy is:
+
+```bash
+# on the instance, via SSM:
+cd /opt/social-surveyor
+sudo -u social-surveyor git pull
+sudo -u social-surveyor uv sync
+sudo systemctl restart social-surveyor@opendata
+```
+
+If secrets changed:
+
+```bash
+# from the laptop:
+AWS_PROFILE=prod deploy/seed-ssm.sh opendata
+# then on the instance:
+sudo /usr/local/bin/social-surveyor-load-env opendata
+sudo systemctl restart social-surveyor@opendata
+```
