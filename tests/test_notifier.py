@@ -7,7 +7,6 @@ import httpx
 import pytest
 
 from social_surveyor.notifier import (
-    ALERTED_EARLIER_CAP,
     CATEGORY_COLORS,
     SLACK_MAX_BLOCKS,
     TOP_N_PER_CATEGORY,
@@ -40,7 +39,6 @@ def _item(
     url: str | None = "https://news.ycombinator.com/item?id=42",
     created_at: datetime | None = None,
     reasoning: str | None = "Explicit first-person cost pain with concrete numbers.",
-    alerted_at: datetime | None = None,
     silenced: bool = False,
 ) -> NotifierItem:
     return NotifierItem(
@@ -54,7 +52,6 @@ def _item(
         url=url,
         created_at=created_at or datetime(2026, 4, 19, 12, 0, tzinfo=UTC),
         reasoning=reasoning,
-        alerted_at=alerted_at,
         silenced=silenced,
     )
 
@@ -246,37 +243,31 @@ def test_digest_no_overflow_hint_when_under_cap() -> None:
     assert "showing top" not in text
 
 
-def test_digest_alerted_earlier_section_shown_and_items_not_duplicated() -> None:
-    """Alerted items appear only in the alerted-earlier section, not
-    also in their category section — deduplicating the user's attention."""
-    alerted_at = datetime(2026, 4, 19, 9, 15, tzinfo=UTC)
-    alerted = _item(
-        item_id="hackernews:100",
-        title="URGENT alert item",
-        category="cost_complaint",
-        urgency=9,
-        alerted_at=alerted_at,
-    )
-    quiet = _item(
-        item_id="hackernews:101",
-        title="routine cost complaint",
-        category="cost_complaint",
-        urgency=7,
-    )
+def test_digest_has_no_alerted_earlier_section() -> None:
+    """The digest renders only items pending in the digest channel.
+    Immediate-channel alerts already landed in their own Slack channel
+    and are considered consumed — no recap section, no "N alerted" in
+    the top header.
+    """
+    items = [
+        _item(
+            item_id="hackernews:100",
+            title="routine cost complaint",
+            category="cost_complaint",
+            urgency=7,
+        ),
+    ]
     payload = build_digest(
-        [alerted, quiet],
+        items,
         DigestStats(day=date(2026, 4, 19), haiku_cost_usd=0, x_cost_usd=0, total_labeled=0),
         _cfg(),
     )
     text = _all_text(payload["blocks"])
-    # Alerted-earlier section renders the urgent item with its alert time.
-    assert "Alerted earlier today" in text
-    assert "URGENT alert item" in text
-    assert "alerted at 09:15" in text
-    # Alerted item appears exactly once (not duplicated in category section).
-    assert text.count("URGENT alert item") == 1
-    # Non-alerted item is still in the category section.
-    assert "routine cost complaint" in text
+    assert "Alerted earlier today" not in text
+    assert "alerted at" not in text
+    # Header no longer carries an "alerted" count.
+    headers = [b["text"]["text"] for b in payload["blocks"] if b.get("type") == "header"]
+    assert not any("alerted" in h for h in headers)
 
 
 def test_digest_silenced_within_window_shows_marker() -> None:
@@ -534,22 +525,6 @@ def test_digest_item_without_body_has_no_preview_line() -> None:
     assert "\n" not in item_sections[0]["text"]["text"]
 
 
-def test_digest_alerted_earlier_block_includes_body_preview() -> None:
-    alerted = _item(
-        item_id="hackernews:500",
-        title="Comment by apurvamehta on HN #47798319",
-        body="We tried the OTel collector on EKS and the memory footprint was rough until we tuned the batch processor.",
-        alerted_at=datetime(2026, 4, 19, 9, 0, tzinfo=UTC),
-    )
-    payload = build_digest(
-        [alerted],
-        DigestStats(day=date(2026, 4, 19), haiku_cost_usd=0, x_cost_usd=0, total_labeled=0),
-        _cfg(),
-    )
-    text = _all_text(payload["blocks"])
-    assert "We tried the OTel collector on EKS" in text
-
-
 def test_digest_items_do_not_include_author() -> None:
     """Author is dropped from per-item lines (low signal; title +
     source do the work)."""
@@ -576,13 +551,7 @@ def test_digest_uses_human_category_labels_when_available() -> None:
     )
     items = [
         _item(item_id="reddit:1", category="cost_complaint", title="a", urgency=7),
-        _item(
-            item_id="reddit:2",
-            category="cost_complaint",
-            title="b",
-            urgency=8,
-            alerted_at=datetime(2026, 4, 19, 9, 0, tzinfo=UTC),
-        ),
+        _item(item_id="reddit:2", category="cost_complaint", title="b", urgency=8),
     ]
     payload = build_digest(
         items,
@@ -624,55 +593,11 @@ def test_digest_category_header_singular_vs_plural() -> None:
 # --- digest block-cap guards -------------------------------------------------
 
 
-def _alerted(i: int, urgency: int = 8, cat: str = "cost_complaint") -> NotifierItem:
-    return _item(
-        item_id=f"hackernews:alert-{i}",
-        category=cat,
-        urgency=urgency,
-        alerted_at=datetime(2026, 4, 19, 23, 50, tzinfo=UTC),
-    )
-
-
-def test_digest_alerted_earlier_capped_with_overflow_context() -> None:
-    alerted = [_alerted(i, urgency=10 - (i % 4)) for i in range(20)]
-    payload = build_digest(
-        alerted,
-        DigestStats(day=date(2026, 4, 19), haiku_cost_usd=0, x_cost_usd=0, total_labeled=0),
-        _cfg(),
-    )
-    blocks = payload["blocks"]
-    alerted_item_sections = [
-        b
-        for b in blocks
-        if b.get("type") == "section"
-        and isinstance(b.get("text"), dict)
-        and "_alerted at" in b["text"].get("text", "")
-    ]
-    assert len(alerted_item_sections) == ALERTED_EARLIER_CAP
-    text = _all_text(blocks)
-    expected_overflow = 20 - ALERTED_EARLIER_CAP
-    assert f"{expected_overflow} more alerted earlier today" in text
-    assert "immediate-alert Slack channel" in text
-
-
-def test_digest_no_alerted_overflow_context_when_under_cap() -> None:
-    alerted = [_alerted(i) for i in range(ALERTED_EARLIER_CAP)]
-    payload = build_digest(
-        alerted,
-        DigestStats(day=date(2026, 4, 19), haiku_cost_usd=0, x_cost_usd=0, total_labeled=0),
-        _cfg(),
-    )
-    text = _all_text(payload["blocks"])
-    assert "more alerted earlier today" not in text
-
-
 def test_digest_total_blocks_stays_under_slack_limit_on_worst_case() -> None:
-    """A burst day: many alerts + many categories each with many items.
-    The naive builder would blow past 50 blocks; the budget trim keeps it
-    safely under SLACK_MAX_BLOCKS.
+    """Burst day: many categories each with many items. The naive builder
+    would blow past 50 blocks; the budget trim keeps it safely under
+    SLACK_MAX_BLOCKS.
     """
-    alerted = [_alerted(i) for i in range(30)]
-    # Seven categories, each with 40 items — far beyond what fits.
     cats = [
         "cost_complaint",
         "self_host_intent",
@@ -682,7 +607,7 @@ def test_digest_total_blocks_stays_under_slack_limit_on_worst_case() -> None:
         "tutorial_or_marketing",
         "off_topic",
     ]
-    items: list[NotifierItem] = list(alerted)
+    items: list[NotifierItem] = []
     for c in cats:
         for i in range(40):
             items.append(
@@ -691,7 +616,6 @@ def test_digest_total_blocks_stays_under_slack_limit_on_worst_case() -> None:
                     category=c,
                     urgency=5,
                     title=f"{c} item {i}",
-                    alerted_at=None,
                 )
             )
     payload = build_digest(
@@ -705,7 +629,6 @@ def test_digest_total_blocks_stays_under_slack_limit_on_worst_case() -> None:
 def test_digest_dropped_categories_get_context_notice() -> None:
     """When categories can't fit the budget, the trailing ones (lowest
     priority in DIGEST_CATEGORY_ORDER) are dropped with a single notice."""
-    items: list[NotifierItem] = [_alerted(i) for i in range(30)]
     cats = [
         "cost_complaint",
         "self_host_intent",
@@ -715,6 +638,7 @@ def test_digest_dropped_categories_get_context_notice() -> None:
         "tutorial_or_marketing",
         "off_topic",
     ]
+    items: list[NotifierItem] = []
     for c in cats:
         for i in range(10):
             items.append(
@@ -722,7 +646,6 @@ def test_digest_dropped_categories_get_context_notice() -> None:
                     item_id=f"hackernews:{c}-{i}",
                     category=c,
                     urgency=5,
-                    alerted_at=None,
                 )
             )
     payload = build_digest(
@@ -738,15 +661,10 @@ def test_digest_dropped_categories_get_context_notice() -> None:
 
 
 def test_digest_light_day_no_budget_trim() -> None:
-    """A normal day easily fits — no "not shown" notice, no alerted overflow."""
+    """A normal day easily fits — no "not shown" notice."""
     items = [
         _item(item_id="hackernews:1", category="cost_complaint", urgency=7),
-        _item(
-            item_id="hackernews:2",
-            category="cost_complaint",
-            urgency=9,
-            alerted_at=datetime(2026, 4, 19, 14, 0, tzinfo=UTC),
-        ),
+        _item(item_id="hackernews:2", category="cost_complaint", urgency=9),
         _item(item_id="reddit:1", category="self_host_intent", urgency=6),
     ]
     payload = build_digest(
@@ -756,7 +674,6 @@ def test_digest_light_day_no_budget_trim() -> None:
     )
     text = _all_text(payload["blocks"])
     assert "categories not shown" not in text
-    assert "more alerted earlier today" not in text
     assert len(payload["blocks"]) <= SLACK_MAX_BLOCKS
 
 

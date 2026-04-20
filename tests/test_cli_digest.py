@@ -118,10 +118,10 @@ def test_digest_dry_run_prints_block_kit_payload(
     payload = json.loads(joined.split("\n\n")[0] if joined else "{}")
     assert "blocks" in payload
     assert result["posted"] is False
-    # The cost_complaint u=8 item routes to immediate (alerted-earlier).
-    # The off_topic item routes to digest. Both should appear in the
-    # digest render.
-    assert result["items"] == 2
+    # The cost_complaint u=8 item routes to immediate and lands in the
+    # immediate Slack channel; the digest does not recap it. Only the
+    # off_topic (digest-channel) item surfaces in the digest render.
+    assert result["items"] == 1
 
 
 def test_digest_posts_to_slack_and_marks_sent(
@@ -284,6 +284,128 @@ def test_digest_since_filter_is_parsed(tmp_path: Path) -> None:
         echo_fn=lambda _m="": None,
     )
     assert narrow["items"] == 0
+
+
+def test_digest_does_not_re_include_items_from_previous_cycle(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Two consecutive digest cycles must not ship the same item twice.
+
+    Regression guard for the SQL OR-branch bug: before the fix, any
+    digest-channel alert whose sent_at fell inside the current 24h
+    window was re-included, so every item got posted in the digest
+    that picked it up AND the one 24h later. The behavior contract:
+    once an item ships in a digest, it's gone from future digests.
+    """
+    projects_root = _write_project_configs(tmp_path)
+    _add_routing_yaml(projects_root)
+    db_path = tmp_path / "data" / "demo.db"
+
+    monkeypatch.setenv("TEST_DEMO_DIGEST_WEBHOOK", "https://hooks.example/digest")
+    monkeypatch.setenv("TEST_DEMO_IMMEDIATE_WEBHOOK", "https://hooks.example/immediate")
+
+    with Storage(db_path) as db:
+        _seed_item_and_classification(
+            db, item_id="hackernews:A", category="off_topic", urgency=1, title="A-shipped"
+        )
+
+    client = httpx.Client(transport=httpx.MockTransport(lambda _r: httpx.Response(200, text="ok")))
+    # Route so an alerts row exists on the digest channel.
+    run_route(
+        "demo",
+        db_path,
+        projects_root,
+        dry_run=False,
+        http_client=client,
+        echo_fn=lambda _m="": None,
+    )
+    # First digest cycle: ships A, marks sent.
+    first = run_digest(
+        "demo",
+        db_path,
+        projects_root,
+        dry_run=False,
+        http_client=client,
+        echo_fn=lambda _m="": None,
+    )
+    client.close()
+    assert first["items"] == 1
+    assert first["marked_sent"] == 1
+
+    # Second digest cycle a little later (still inside the same 24h
+    # rolling window as the first cycle — this is the exact condition
+    # that used to trigger the duplication).
+    client2 = httpx.Client(transport=httpx.MockTransport(lambda _r: httpx.Response(200, text="ok")))
+    second = run_digest(
+        "demo",
+        db_path,
+        projects_root,
+        dry_run=True,  # dry so no extra Slack call needed
+        http_client=client2,
+        echo_fn=lambda _m="": None,
+    )
+    client2.close()
+    assert second["items"] == 0
+
+
+def test_digest_category_inspection_shows_both_sent_and_pending(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Operator inspection via `--category` must surface both currently-
+    pending and previously-delivered alerts in the window. The digest
+    render path hides delivered items (already in Slack), but the
+    inspection path is the local source of truth — it has to see
+    everything regardless of which Slack channel the item went to.
+    """
+    projects_root = _write_project_configs(tmp_path)
+    _add_routing_yaml(projects_root)
+    db_path = tmp_path / "data" / "demo.db"
+    monkeypatch.setenv("TEST_DEMO_DIGEST_WEBHOOK", "https://hooks.example/digest")
+    monkeypatch.setenv("TEST_DEMO_IMMEDIATE_WEBHOOK", "https://hooks.example/immediate")
+
+    with Storage(db_path) as db:
+        # Two digest-channel items in the same category.
+        _seed_item_and_classification(
+            db, item_id="hackernews:shipped", category="off_topic", urgency=0, title="shipped item"
+        )
+        _seed_item_and_classification(
+            db, item_id="hackernews:pending", category="off_topic", urgency=0, title="pending item"
+        )
+
+    client = httpx.Client(transport=httpx.MockTransport(lambda _r: httpx.Response(200, text="ok")))
+    run_route(
+        "demo",
+        db_path,
+        projects_root,
+        dry_run=False,
+        http_client=client,
+        echo_fn=lambda _m="": None,
+    )
+
+    # Ship one item in a prior digest cycle, leave the other pending.
+    with Storage(db_path) as db:
+        db._conn.execute(
+            "UPDATE alerts SET sent_at = ? WHERE item_id = ?",
+            (datetime.now(UTC).isoformat(), "hackernews:shipped"),
+        )
+        db._conn.commit()
+
+    echoed: list[str] = []
+    result = run_digest(
+        "demo",
+        db_path,
+        projects_root,
+        dry_run=False,
+        category="off_topic",
+        echo_fn=echoed.append,
+    )
+    assert result["posted"] is False
+    text = "\n".join(echoed)
+    # Both items visible; sent state tagged so the operator can tell them apart.
+    assert "shipped item" in text
+    assert "pending item" in text
+    assert "(sent)" in text
+    assert "(pending)" in text
 
 
 def test_digest_requires_routing_yaml(tmp_path: Path) -> None:

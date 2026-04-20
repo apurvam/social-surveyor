@@ -97,12 +97,6 @@ TOP_N_PER_CATEGORY = 5
 # context block.
 SLACK_MAX_BLOCKS = 48
 
-# Cap the alerted-earlier section to keep bursty days (backlog flushes,
-# launches that generate many quick alerts) from swamping the digest.
-# Overflow gets a context pointer to the immediate-alert channel where
-# the full list already lives.
-ALERTED_EARLIER_CAP = 5
-
 # Truncation bounds. 120 chars is what fits in a Slack section at a
 # normal window width; 200 on bodies is enough to skim without eating
 # the whole screen. X gets a wider title cap because X posts top out at
@@ -179,9 +173,6 @@ class NotifierItem:
     url: str | None
     created_at: datetime
     reasoning: str | None = None
-    # For digest "alerted earlier today" section. None means not alerted
-    # in this window; a timestamp means it was.
-    alerted_at: datetime | None = None
     # True when this item was silenced within the digest window —
     # shown with 🔕 marker in its category. Older silences filter the
     # item out entirely upstream, so this flag is only ever true inside
@@ -266,22 +257,21 @@ def build_digest(
 
     Structure:
 
-    1. Header line with day, counts, alerted-earlier count, and cost
-    2. Alerted-earlier section (if any items alerted in the window)
-    3. One section per category in :data:`DIGEST_CATEGORY_ORDER`,
+    1. Header line with day, counts, and cost
+    2. One section per category in :data:`DIGEST_CATEGORY_ORDER`,
        skipping empty categories. Each section shows the top 5 items
        by urgency (then recency), with an overflow hint if the
        category has more than 5.
-    4. Cost/accuracy footer
+    3. Cost/accuracy footer
+
+    Items routed to the immediate channel do not appear here — they
+    landed in the immediate Slack channel and are considered consumed.
+    Items posted in a prior digest cycle are filtered out upstream in
+    :func:`social_surveyor.cli_digest.run_digest` so each item ships in
+    at most one digest.
     """
-    alerted = [i for i in items if i.alerted_at is not None]
-    # Alerted-earlier items appear only in their own section, not in
-    # category sections. Without this, they'd render twice in the same
-    # digest — the spec's "K alerted earlier" call-out is meant as a
-    # lift, not a duplicate listing.
-    unalerted = [i for i in items if i.alerted_at is None]
     by_category: dict[str, list[NotifierItem]] = {c: [] for c in DIGEST_CATEGORY_ORDER}
-    for item in unalerted:
+    for item in items:
         bucket = by_category.setdefault(item.category, [])
         bucket.append(item)
 
@@ -307,41 +297,13 @@ def build_digest(
         top_header_text = (
             f"📊 Digest for {stats.day.isoformat()} · "
             f"{len(items)} {items_noun} · {len(ordered_categories)} {cats_noun} · "
-            f"{len(alerted)} alerted · ${total_cost:.2f}"
+            f"${total_cost:.2f}"
         )
     blocks.append(_header_block(top_header_text))
 
     if not items:
         blocks.extend(_cost_footer(stats))
         return {"blocks": blocks}
-
-    # --- alerted-earlier section ---
-    if alerted:
-        alerted_sorted = sorted(
-            alerted,
-            key=lambda i: (-(i.urgency), -(i.alerted_at or datetime.now(UTC)).timestamp()),
-        )
-        shown_alerted = alerted_sorted[:ALERTED_EARLIER_CAP]
-        alerted_overflow = len(alerted_sorted) - len(shown_alerted)
-        blocks.append({"type": "divider"})
-        blocks.append(_header_block("🔔 Alerted earlier today"))
-        for item in shown_alerted:
-            blocks.append(_alerted_earlier_block(item, config))
-        if alerted_overflow > 0:
-            blocks.append(
-                {
-                    "type": "context",
-                    "elements": [
-                        {
-                            "type": "mrkdwn",
-                            "text": (
-                                f"_{alerted_overflow} more alerted earlier today — "
-                                f"see the immediate-alert Slack channel for the full list_"
-                            ),
-                        }
-                    ],
-                }
-            )
 
     # --- per-category sections ---
     # Build each category's blocks as a self-contained group so the
@@ -427,30 +389,6 @@ def _build_category_group(
 
 
 # --- block helpers -----------------------------------------------------------
-
-
-def _alerted_earlier_block(item: NotifierItem, config: NotifierConfig) -> dict[str, Any]:
-    """Compact single-item block for the 'alerted earlier' digest section.
-
-    Source + human-friendly category, linked title, optional body
-    preview, alerted-at timestamp, trailing monospace ``<item_id>``.
-    Author is omitted — in daily scanning the author name adds little
-    over the title and source; when you click through, the discussion
-    has them anyway.
-    """
-    alerted_at = item.alerted_at or item.created_at
-    title = _truncate(item.title or "(no title)", _title_max(item.source))
-    cat_display = config.category_display(item.category)
-    lines = [
-        f"{_source_label(item.source)}  {cat_display}",
-        f"> {_linked_title(title, item.url)}",
-    ]
-    preview = _body_preview(item)
-    if preview is not None:
-        lines.append(f"> _{preview}_")
-    lines.append(f"_alerted at {alerted_at.strftime('%H:%M')}_")
-    lines.append(f"`{item.item_id}`")
-    return {"type": "section", "text": {"type": "mrkdwn", "text": "\n".join(lines)}}
 
 
 def _digest_item_block(item: NotifierItem, config: NotifierConfig) -> dict[str, Any]:
@@ -734,7 +672,6 @@ def post_infra_alert(
 
 
 __all__ = [
-    "ALERTED_EARLIER_CAP",
     "CATEGORY_COLORS",
     "CATEGORY_EMOJI",
     "DIGEST_CATEGORY_ORDER",

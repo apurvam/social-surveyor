@@ -424,6 +424,29 @@ Added session — explicitly addresses "how do I know this is running and not si
 
 **Non-goals (across all 5x sessions):** RSS blog sources, author enrichment, multi-region.
 
+### Session 5d — Digest de-duplication + inspection flexibility
+
+**Bug surfaced:** Observing the prod dry-run output on 2026-04-20 revealed that the digest was re-shipping items from the previous cycle. Root cause in `storage.list_alerts_in_window`: for `include_unsent=True` (the digest-render path), the SQL matched both pending alerts AND any already-sent alert whose `sent_at` fell within the rolling window. With a 24h cadence and 24h window, every digest-channel item shipped in two consecutive daily digests — the stated contract in the CLI's docstring was "tomorrow's run doesn't re-include," but the SQL did not enforce it.
+
+**Secondary concern:** the "🔔 Alerted earlier today" digest section duplicated content already delivered to the immediate Slack channel. Once consumed there, a recap in the digest was noise rather than signal.
+
+**Scope:**
+
+- Narrow the `include_unsent=True` branch in `storage.list_alerts_in_window` to return only `sent_at IS NULL AND queued_at >= since` (pending only, disjoint from the sent-only branch).
+- Remove the "Alerted earlier today" section from `build_digest` — drop `NotifierItem.alerted_at`, the `_alerted_earlier_block` helper, the alerted count in the top header, and `ALERTED_EARLIER_CAP`.
+- `_run_category_inspection` now issues three window queries (sent immediate + sent digest + pending digest) and concatenates, annotating each line with `(sent)` or `(pending)` so the operator can see full local history regardless of which Slack channel the item went to.
+
+**Acceptance:**
+
+- `tests/test_storage.py::test_list_alerts_in_window_consecutive_digest_cycles_do_not_duplicate` passes — pinpoint regression for the SQL OR-branch bug.
+- `tests/test_cli_digest.py::test_digest_does_not_re_include_items_from_previous_cycle` passes — end-to-end proof: first digest ships item A, second digest (same window) ships zero items.
+- `tests/test_cli_digest.py::test_digest_category_inspection_shows_both_sent_and_pending` passes — inspection mode surfaces delivered + pending with state tags.
+- `tests/test_notifier.py::test_digest_has_no_alerted_earlier_section` passes — no recap, no "alerted" count in the header.
+- Full suite: 376 green.
+- Prod dry-run via `social-surveyor digest --project opendata --dry-run` shows a strict delta from the previous cycle (verify by running dry-run, confirming items shipped in today's 9am digest are absent).
+
+**Non-goals:** Changing the `include_unsent` API into an enum or three-valued parameter; introducing a "delivered-at" audit view beyond what category inspection already surfaces.
+
 ### Session 5.5 — Public/private config split (conditional)
 
 **Trigger:** If by the end of session 5 the classifier prompt and ICP description reveal competitive positioning you'd rather not telegraph publicly, do this session. Otherwise skip.

@@ -97,7 +97,7 @@ def run_digest(
                 echo_fn=echo_fn,
             )
 
-        items = _collect_digest_items(db, routing_cfg, window_start=window_start)
+        items = _collect_digest_items(db, window_start=window_start)
         stats = _compute_digest_stats(db, project, projects_root, window_start=window_start)
 
         payload = build_digest(items, stats, notifier_cfg)
@@ -144,26 +144,23 @@ def run_digest(
 
 def _collect_digest_items(
     db: Storage,
-    routing_cfg: Any,
     *,
     window_start: datetime,
 ) -> list[NotifierItem]:
-    """Pull items for both the alerted-earlier and category sections.
+    """Pull digest-channel items pending for this cycle.
 
-    - Alerted-earlier: ``channel='immediate'`` alerts with
-      ``sent_at >= window_start``.
-    - Category sections: ``channel='digest'`` alerts in the window
-      (sent or not). Silenced items are hidden *unless* their silence
-      is within the window, in which case they render with a marker.
+    Returns ``channel='digest'`` alerts that are still unsent and were
+    queued within the window. Items posted in a prior digest are
+    filtered out at the SQL layer (see
+    :meth:`Storage.list_alerts_in_window`) so each item ships in at
+    most one digest. Immediate-channel items are not included — they
+    were delivered to the immediate Slack channel and are consumed.
+
+    Silenced items are hidden *unless* their silence is within the
+    window, in which case they render with a marker.
     """
-    since_silence = window_start
-    silenced_in_window = db.silenced_since(since_silence)
+    silenced_in_window = db.silenced_since(window_start)
 
-    alerted_rows = db.list_alerts_in_window(
-        channel="immediate",
-        since=window_start,
-        include_unsent=False,
-    )
     digest_rows = db.list_alerts_in_window(
         channel="digest",
         since=window_start,
@@ -171,9 +168,6 @@ def _collect_digest_items(
     )
 
     items: list[NotifierItem] = []
-    for row in alerted_rows:
-        items.append(_row_to_notifier_item(row, alerted=True))
-
     for row in digest_rows:
         item_id = row["item_id"]
         is_silenced_now = db.is_silenced(item_id)
@@ -182,13 +176,7 @@ def _collect_digest_items(
             # already decided they don't want to see it; don't spam
             # them by re-litigating with the marker.
             continue
-        items.append(
-            _row_to_notifier_item(
-                row,
-                alerted=False,
-                silenced=is_silenced_now,
-            )
-        )
+        items.append(_row_to_notifier_item(row, silenced=is_silenced_now))
 
     return items
 
@@ -196,7 +184,6 @@ def _collect_digest_items(
 def _row_to_notifier_item(
     row: dict[str, Any],
     *,
-    alerted: bool,
     silenced: bool = False,
 ) -> NotifierItem:
     return NotifierItem(
@@ -210,7 +197,6 @@ def _row_to_notifier_item(
         url=row.get("url"),
         created_at=row["created_at"],
         reasoning=row.get("reasoning"),
-        alerted_at=row.get("sent_at") if alerted else None,
         silenced=silenced,
     )
 
@@ -280,12 +266,22 @@ def _run_category_inspection(
     limit: int | None,
     echo_fn: Any,
 ) -> dict[str, Any]:
-    """Print every item in ``category`` within the window to stdout."""
-    rows_immediate = db.list_alerts_in_window(
+    """Print every item in ``category`` within the window to stdout.
+
+    Aggregates every alert that landed in ``[since, now]``, regardless
+    of which Slack channel it went to and regardless of whether it was
+    already posted. Each item is tagged with its sent state so the
+    operator can tell "this is still pending" from "this shipped at
+    09:02 last Tuesday."
+    """
+    # sent + pending, across both channels — this is the operator's
+    # "what happened in this category" lookup, so we want the union.
+    sent_immediate = db.list_alerts_in_window(
         channel="immediate", since=since, include_unsent=False
     )
-    rows_digest = db.list_alerts_in_window(channel="digest", since=since, include_unsent=True)
-    rows = [r for r in (rows_immediate + rows_digest) if r["category"] == category]
+    sent_digest = db.list_alerts_in_window(channel="digest", since=since, include_unsent=False)
+    pending_digest = db.list_alerts_in_window(channel="digest", since=since, include_unsent=True)
+    rows = [r for r in (sent_immediate + sent_digest + pending_digest) if r["category"] == category]
     rows.sort(
         key=lambda r: (-(int(r["urgency"])), -(r["created_at"].timestamp())),
     )
@@ -297,7 +293,10 @@ def _run_category_inspection(
     for r in rows:
         title = (r.get("title") or "(no title)")[:100]
         author = r.get("author") or "unknown"
-        echo_fn(f"u={r['urgency']}  {r['item_id']}  [{r['source']}]  {title!r} by {author}")
+        state = "sent" if r.get("sent_at") is not None else "pending"
+        echo_fn(
+            f"u={r['urgency']}  {r['item_id']}  [{r['source']}]  ({state})  {title!r} by {author}"
+        )
         url = r.get("url")
         if url:
             echo_fn(f"    {url}")
