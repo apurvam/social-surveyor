@@ -12,11 +12,14 @@ from social_surveyor.notifier import (
     SLACK_MAX_BLOCKS,
     TOP_N_PER_CATEGORY,
     DigestStats,
+    InfraAlertChannel,
     NotifierConfig,
     NotifierItem,
     SlackPostError,
     build_digest,
     build_immediate_alert,
+    build_infra_alert,
+    post_infra_alert,
     post_to_slack,
 )
 
@@ -798,3 +801,79 @@ def test_post_to_slack_raises_on_non_200() -> None:
             )
     finally:
         client.close()
+
+
+# --- infra alert builder + poster -------------------------------------------
+
+
+def test_build_infra_alert_basic_shape() -> None:
+    payload = build_infra_alert(
+        "Haiku cost cap exceeded: 1,200/1,000 tokens today",
+        "Classification halted until UTC midnight rollover.",
+        severity="fatal",
+    )
+    assert "blocks" in payload
+    assert len(payload["blocks"]) == 1
+    block = payload["blocks"][0]
+    assert block["type"] == "section"
+    text = block["text"]["text"]
+    assert "🚨" in text
+    assert "FATAL" in text
+    assert "Haiku cost cap exceeded" in text
+    assert "UTC midnight" in text
+
+
+def test_build_infra_alert_prefix_prepended_to_subject() -> None:
+    payload = build_infra_alert(
+        "Thing went wrong",
+        "Details here.",
+        severity="warn",
+        prefix="[INFRA] ",
+    )
+    text = payload["blocks"][0]["text"]["text"]
+    assert "[INFRA] Thing went wrong" in text
+    assert "⚠️" in text
+    assert "WARN" in text
+
+
+def test_build_infra_alert_escapes_mrkdwn_metacharacters() -> None:
+    payload = build_infra_alert(
+        "Cap exceeded: 2 > 1",
+        "See <https://dashboard> & verify.",
+        severity="fatal",
+    )
+    text = payload["blocks"][0]["text"]["text"]
+    # Escaped to HTML entities per Slack's mrkdwn rules.
+    assert "&gt;" in text
+    assert "&lt;" in text
+    assert "&amp;" in text
+
+
+def test_post_infra_alert_sends_to_channel_url() -> None:
+    captured: dict[str, Any] = {}
+
+    def handler(req: httpx.Request) -> httpx.Response:
+        captured["url"] = str(req.url)
+        captured["body"] = req.content.decode()
+        return httpx.Response(200, text="ok")
+
+    client = httpx.Client(transport=httpx.MockTransport(handler))
+    channel = InfraAlertChannel(
+        webhook_url="https://hooks.slack.example/INFRA",
+        source="infra",
+        prefix="",
+    )
+    try:
+        post_infra_alert(
+            channel,
+            subject="cap exceeded",
+            body="halted",
+            severity="fatal",
+            client=client,
+        )
+    finally:
+        client.close()
+
+    assert captured["url"] == "https://hooks.slack.example/INFRA"
+    assert "FATAL" in captured["body"]
+    assert "cap exceeded" in captured["body"]

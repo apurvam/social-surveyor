@@ -102,6 +102,19 @@ SCHEMA_STATEMENTS: tuple[str, ...] = (
     """,
     "CREATE INDEX IF NOT EXISTS idx_alerts_channel_sent ON alerts(channel, sent_at)",
     "CREATE INDEX IF NOT EXISTS idx_alerts_classification ON alerts(classification_id)",
+    # Session 5a-polish: idempotency table for infra alerts (cost-cap
+    # halts, future session-5c staleness alerts). One row per
+    # (alert_kind, UTC date) means at most one Slack post per day per
+    # kind, so a 10-minute scheduler loop in the halt state doesn't
+    # spam the infra channel.
+    """
+    CREATE TABLE IF NOT EXISTS infra_alerts (
+        alert_kind  TEXT NOT NULL,
+        alert_day   TEXT NOT NULL,
+        alerted_at  TEXT NOT NULL,
+        PRIMARY KEY (alert_kind, alert_day)
+    )
+    """,
 )
 
 
@@ -771,6 +784,27 @@ class Storage:
             (item_id,),
         ).fetchone()
         return row is not None
+
+    def record_infra_alert_once(self, alert_kind: str, alert_day: str) -> bool:
+        """Insert a row gating an infra-channel Slack post.
+
+        Returns True when newly inserted (caller should post the alert),
+        False when ``(alert_kind, alert_day)`` already exists (caller
+        should skip — the alert went out earlier today).
+
+        Idempotent by design: the cap-check scheduler job runs every
+        classify cycle and must not re-page for the same incident.
+        """
+        with self._conn:
+            cur = self._conn.execute(
+                """
+                INSERT INTO infra_alerts (alert_kind, alert_day, alerted_at)
+                VALUES (?, ?, ?)
+                ON CONFLICT(alert_kind, alert_day) DO NOTHING
+                """,
+                (alert_kind, alert_day, _to_iso(datetime.now(UTC))),
+            )
+            return cur.rowcount == 1
 
     def silenced_since(self, since: datetime) -> set[str]:
         """Item IDs silenced on or after ``since``.

@@ -659,6 +659,80 @@ def post_to_slack(
         raise SlackPostError(f"Slack webhook POST failed: {resp.status_code} {resp.text[:200]}")
 
 
+# --- infra alerts ------------------------------------------------------------
+# Ops-side messages (cost-cap halts, staleness, etc.) — visually
+# distinct from content cards so the on-call can tell "your tool is
+# unhappy" from "a cost-complaint post just appeared on HN".
+
+_INFRA_SEVERITY_ICON: dict[str, str] = {
+    "fatal": "🚨",
+    "warn": "⚠️",
+    "info": "ℹ️",  # noqa: RUF001 (INFORMATION SOURCE rendered as emoji, intentional)
+}
+
+
+@dataclass(frozen=True)
+class InfraAlertChannel:
+    """Resolved webhook target + optional subject prefix for an infra alert.
+
+    ``source`` is a human-readable channel label used in structured
+    logs (e.g. ``"infra"`` vs ``"immediate-fallback"``). ``prefix`` is
+    prepended to the subject when posting into a shared channel so
+    infra messages remain distinguishable from content alerts.
+    """
+
+    webhook_url: str
+    source: str
+    prefix: str = ""
+
+
+def build_infra_alert(
+    subject: str,
+    body: str,
+    *,
+    severity: str = "fatal",
+    prefix: str = "",
+) -> dict[str, Any]:
+    """Pure Block Kit payload for an infra alert.
+
+    Kept deliberately simple: severity icon + subject + body, one
+    section, no attachments. The information density of an immediate
+    alert isn't warranted for ops messages, and staying off
+    attachments means the message renders the same in every Slack
+    client (mobile, desktop, mobile push preview).
+    """
+    icon = _INFRA_SEVERITY_ICON.get(severity, _INFRA_SEVERITY_ICON["fatal"])
+    full_subject = f"{prefix}{subject}" if prefix else subject
+    text = (
+        f"{icon}  *{severity.upper()}*  ·  {_escape_mrkdwn(full_subject)}\n{_escape_mrkdwn(body)}"
+    )
+    return {
+        "blocks": [
+            {"type": "section", "text": {"type": "mrkdwn", "text": text}},
+        ]
+    }
+
+
+def post_infra_alert(
+    channel: InfraAlertChannel,
+    *,
+    subject: str,
+    body: str,
+    severity: str = "fatal",
+    client: httpx.Client | None = None,
+) -> None:
+    """Build and POST an infra alert. Raises :class:`SlackPostError` on
+    a non-200 response.
+
+    ``client`` is injectable for tests via ``httpx.MockTransport``. The
+    caller decides whether to swallow failures — for cost-cap halts the
+    caller logs and continues so a flaky Slack doesn't mask the halt
+    itself.
+    """
+    payload = build_infra_alert(subject, body, severity=severity, prefix=channel.prefix)
+    post_to_slack(payload, channel.webhook_url, client=client)
+
+
 __all__ = [
     "ALERTED_EARLIER_CAP",
     "CATEGORY_COLORS",
@@ -667,10 +741,13 @@ __all__ = [
     "SLACK_MAX_BLOCKS",
     "TOP_N_PER_CATEGORY",
     "DigestStats",
+    "InfraAlertChannel",
     "NotifierConfig",
     "NotifierItem",
     "SlackPostError",
     "build_digest",
     "build_immediate_alert",
+    "build_infra_alert",
+    "post_infra_alert",
     "post_to_slack",
 ]

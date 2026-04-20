@@ -5,8 +5,15 @@
 #   alert. Everything else goes to the daily digest.
 # - Webhook URLs live in env vars (or SSM in prod). This file names
 #   them; it never contains the URLs themselves.
-# - cost_caps: hard daily ceilings. Session 4 parses them; full
-#   enforcement is a follow-on (X already has its own daily_read_cap).
+# - cost_caps: hard daily ceilings. daily_haiku_tokens is enforced at
+#   the start of every classify invocation; the check sums today's
+#   input+output tokens from api_usage and halts classification (and
+#   pages the infra channel once per UTC day) when the ceiling is
+#   crossed. X already has its own daily_read_cap enforced per-call.
+# - infra: optional webhook for ops-side alerts (cost-cap halts,
+#   future session-5c staleness alerts). If the secret name resolves,
+#   alerts land here; otherwise they fall back to the immediate
+#   webhook with a [INFRA] prefix so the operator still gets paged.
 
 version: 2
 
@@ -30,3 +37,9 @@ digest:
 cost_caps:
   daily_haiku_tokens: 500000
   daily_x_reads: 2000
+
+infra:
+  # Leave commented out to skip the dedicated infra channel; the
+  # cost-cap fallback path will page the immediate channel with a
+  # [INFRA] prefix instead.
+  # webhook_secret: EXAMPLE_SLACK_WEBHOOK_INFRA

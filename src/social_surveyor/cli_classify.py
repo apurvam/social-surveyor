@@ -40,7 +40,9 @@ from .config import (
     load_categories,
     load_classifier_config,
     load_project_config,
+    load_routing_config,
 )
+from .cost_caps import enforce_haiku_cap
 from .storage import Storage
 
 log = structlog.get_logger("cli.classify")
@@ -67,6 +69,7 @@ def run_classify(
         project_cfg = load_project_config(project, projects_root=projects_root)
         base_clf_cfg = load_classifier_config(project, projects_root=projects_root)
         categories = load_categories(project, projects_root=projects_root)
+        routing_cfg = load_routing_config(project, projects_root=projects_root)
     except ConfigError as e:
         raise typer.BadParameter(str(e)) from None
 
@@ -76,6 +79,13 @@ def run_classify(
         raise typer.BadParameter(f"no DB at {db_path} yet — run a poll first")
 
     with Storage(db_path) as db:
+        # Cap check runs before any API-bound work. Dry-run makes no
+        # Anthropic calls so we skip the gate there — the operator is
+        # inspecting prompts, not spending money, and the skip keeps
+        # dry-run behavior stable regardless of today's spend.
+        if not dry_run and not enforce_haiku_cap(db, routing_cfg, echo_fn=echo_fn):
+            return {"classified": 0, "failed": 0, "halted": 1}
+
         if item_id is not None:
             return _classify_one(
                 item_id=item_id,
