@@ -1,9 +1,17 @@
-# Deploy runbook — social-surveyor on EC2 (Session 5a)
+# Deploy runbook — social-surveyor on EC2
 
-Minimal production deploy: one t4g.micro behind an IAM role, polling
-on cron inside a single Python process, secrets in SSM Parameter
-Store. No CI/CD, no health endpoint, no automated rsync — those come
-in 5a-polish, 5b, and 5c.
+One t4g.micro behind an IAM role, polling on cron inside a single
+Python process, secrets in SSM Parameter Store. `/health` and
+CI/CD come in 5b and 5c. Session 5a-polish adds:
+
+- **Haiku daily token cost cap** — enforced in the classifier; halts
+  classification until UTC midnight when today's input+output tokens
+  cross `routing.cost_caps.daily_haiku_tokens`, and pages the infra
+  channel exactly once per day.
+- **`deploy/deploy.sh`** — one-command tag-based deploy over SSM.
+- **SSM Parameter Store fallback in `resolve_secret`** — belt-and-
+  suspenders on top of the `EnvironmentFile` path for production.
+- **Weekly EBS snapshots** — DLM-managed, 4 retained, Sunday 02:00 UTC.
 
 If you are reforking this repo for your own project, copy
 `Pulumi.opendata.example.yaml` to `Pulumi.<yourproject>.yaml` and
