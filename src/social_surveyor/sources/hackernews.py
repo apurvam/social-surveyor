@@ -184,12 +184,14 @@ class HackerNewsSource(Source):
                 else f"Comment by {author or 'anonymous'} on HN"
             )
             body = hit.get("comment_text") or ""
-            url = HN_ITEM_URL_TEMPLATE.format(id_=object_id)
         else:
             title = hit.get("title") or f"(untitled story {object_id})"
-            # Prefer the external URL if present — matches session 2 spec.
-            url = hit.get("url") or HN_ITEM_URL_TEMPLATE.format(id_=object_id)
             body = hit.get("story_text") or None
+        # Always link to the HN discussion, not the external article URL
+        # for link-stories. We're monitoring discussions; clicking through
+        # to a third-party blog loses the thread context the operator
+        # actually wants to read.
+        url = HN_ITEM_URL_TEMPLATE.format(id_=object_id)
 
         cleaned_body = _strip_html(body) if body else None
         return RawItem(
