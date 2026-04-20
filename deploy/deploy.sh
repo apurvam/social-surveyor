@@ -1,15 +1,21 @@
 #!/bin/bash
-# One-command tag-based deploy for social-surveyor over AWS SSM.
+# One-command deploy for social-surveyor over AWS SSM.
 #
 # Usage:
-#   deploy/deploy.sh                        # deploys HEAD's most recent tag
+#   deploy/deploy.sh                        # deploys origin/main HEAD
 #   deploy/deploy.sh v0.6.0                 # deploys a specific tag
-#   deploy/deploy.sh v0.6.0 --dry-run       # prints the remote command,
+#   deploy/deploy.sh fix/something          # deploys a branch tip
+#   deploy/deploy.sh abc1234                # deploys a specific commit
+#   deploy/deploy.sh --dry-run              # prints the remote command,
 #                                             makes no SSM call
 #   deploy/deploy.sh --help
 #
+# Accepts any git ref the local clone knows about: tag, branch (via
+# origin/<name>), or SHA. Defaults to origin/main so the tag-less
+# "deploy latest main" flow stays one keystroke.
+#
 # Environment:
-#   AWS_PROFILE                 profile to use (passed through to aws CLI)
+#   AWS_PROFILE                 profile passed through to aws CLI
 #   AWS_DEFAULT_REGION          region (defaults to us-west-2)
 #   SOCIAL_SURVEYOR_INSTANCE_ID  EC2 instance id; if unset, resolves via
 #                               `pulumi stack output instance_id`
@@ -21,10 +27,11 @@
 #   --project <name>             override systemd project name
 #   --help                       this message
 #
-# What it does on the instance:
+# What it does on the instance (commands run against the resolved SHA,
+# so the remote state is byte-identical to the laptop's view):
 #   1. cd /opt/social-surveyor
-#   2. git fetch --tags
-#   3. git checkout <tag>
+#   2. git fetch --all --tags
+#   3. git checkout --detach <sha>
 #   4. uv sync
 #   5. systemctl restart social-surveyor@<project>
 #   6. journalctl -u social-surveyor@<project> --since '10 seconds ago'
@@ -38,7 +45,7 @@ REGION="${AWS_DEFAULT_REGION:-us-west-2}"
 PROJECT="${SOCIAL_SURVEYOR_PROJECT:-opendata}"
 DRY_RUN=0
 ALLOW_DIRTY=0
-TAG=""
+REF=""
 
 usage() {
     sed -n 's/^# \{0,1\}//p' "$0" | awk '/^Usage:/,/^$/ {print}'
@@ -77,8 +84,8 @@ while [ $# -gt 0 ]; do
             die "unknown flag: $1"
             ;;
         *)
-            [ -z "$TAG" ] || die "only one tag may be specified (got '$TAG' and '$1')"
-            TAG="$1"
+            [ -z "$REF" ] || die "only one ref may be specified (got '$REF' and '$1')"
+            REF="$1"
             shift
             ;;
     esac
@@ -94,33 +101,42 @@ if [ "$ALLOW_DIRTY" -eq 0 ]; then
     fi
 fi
 
-BRANCH=$(git rev-parse --abbrev-ref HEAD 2>/dev/null || echo "unknown")
-if [ "$BRANCH" != "main" ]; then
-    echo "warning: current branch is '$BRANCH', not 'main'" >&2
+# --- resolve ref to a SHA ---
+# Refresh both branch and tag refs before resolving. Offline? Skip and
+# hope the local cache has what we need.
+git fetch --quiet --tags origin 2>/dev/null || true
+
+# Default to main HEAD — matches the pre-deploy.sh workflow where "go"
+# meant "whatever latest main is."
+if [ -z "$REF" ]; then
+    REF="main"
 fi
 
-# --- resolve tag ---
-if [ -z "$TAG" ]; then
-    TAG=$(git describe --tags --abbrev=0 2>/dev/null || true)
-    [ -n "$TAG" ] || die "no tag on HEAD; pass one explicitly (e.g. v0.6.0)"
+REF_TYPE=""
+RESOLVED_SHA=""
+if git rev-parse --verify --quiet "refs/tags/${REF}" >/dev/null; then
+    REF_TYPE="tag"
+    # Dereference annotated tags to their commit SHA.
+    RESOLVED_SHA=$(git rev-parse "refs/tags/${REF}^{commit}")
+elif git rev-parse --verify --quiet "refs/remotes/origin/${REF}" >/dev/null; then
+    REF_TYPE="branch"
+    RESOLVED_SHA=$(git rev-parse "refs/remotes/origin/${REF}")
+elif git rev-parse --verify --quiet "${REF}^{commit}" >/dev/null 2>&1; then
+    REF_TYPE="commit"
+    RESOLVED_SHA=$(git rev-parse "${REF}^{commit}")
+else
+    die "ref '${REF}' is not a tag, a branch on origin, or a known commit SHA"
 fi
 
-# Confirm the tag exists in the repo. If it's not already in the local
-# ref set, try fetching; bail if still missing.
-if ! git rev-parse --verify --quiet "refs/tags/${TAG}" >/dev/null; then
-    git fetch --tags --quiet || true
-fi
-if ! git rev-parse --verify --quiet "refs/tags/${TAG}" >/dev/null; then
-    die "tag '$TAG' not found locally (fetch from remote first)"
-fi
-
-# Confirm the tag was pushed. The instance pulls from origin; a tag
-# that's only local will silently fail the remote checkout.
-if ! git ls-remote --tags origin "$TAG" 2>/dev/null | grep -q "refs/tags/${TAG}"; then
-    if [ "$DRY_RUN" -eq 0 ]; then
-        die "tag '$TAG' is not on origin — push it first (git push origin $TAG)"
-    else
-        echo "warning: tag '$TAG' is not on origin (would fail at remote checkout)" >&2
+# For tags, also confirm the tag is on origin so a local-only tag
+# doesn't silently fail the remote checkout.
+if [ "$REF_TYPE" = "tag" ]; then
+    if ! git ls-remote --tags origin "$REF" 2>/dev/null | grep -q "refs/tags/${REF}"; then
+        if [ "$DRY_RUN" -eq 0 ]; then
+            die "tag '$REF' is not on origin — push it first (git push origin $REF)"
+        else
+            echo "warning: tag '$REF' is not on origin (would fail at remote checkout)" >&2
+        fi
     fi
 fi
 
@@ -136,16 +152,16 @@ if [ -z "$INSTANCE_ID" ]; then
 fi
 
 # --- build the remote command ---
-# Note: using $PROJECT/$TAG is safe here because earlier parsing
-# restricts them to tokens that survive through bash / systemd. The
-# script still validates that they're present and non-empty above.
+# We pass the resolved SHA rather than the user-facing ref so the
+# remote checkout is byte-identical to what the laptop sees — no
+# ambiguity between a local branch tip and the remote branch tip.
 REMOTE_SCRIPT=$(cat <<REMOTE
 set -euo pipefail
 cd /opt/social-surveyor
-echo '==> git fetch --tags'
-sudo -u social-surveyor git fetch --tags
-echo '==> git checkout ${TAG}'
-sudo -u social-surveyor git checkout --detach ${TAG}
+echo '==> git fetch --all --tags (from ${REF_TYPE} ${REF})'
+sudo -u social-surveyor git fetch --all --tags --quiet
+echo '==> git checkout --detach ${RESOLVED_SHA}'
+sudo -u social-surveyor git checkout --detach ${RESOLVED_SHA}
 echo '==> uv sync'
 sudo -u social-surveyor /usr/local/bin/uv sync --directory /opt/social-surveyor
 echo '==> systemctl restart social-surveyor@${PROJECT}'
@@ -159,7 +175,8 @@ REMOTE
 )
 
 echo "deploy target:"
-echo "  tag:      $TAG"
+echo "  ref:      $REF ($REF_TYPE)"
+echo "  sha:      $RESOLVED_SHA"
 echo "  project:  $PROJECT"
 echo "  instance: $INSTANCE_ID"
 echo "  region:   $REGION"
@@ -251,4 +268,4 @@ if [ "$STATUS" != "Success" ]; then
     exit 1
 fi
 
-echo "==> deploy complete: $TAG on $INSTANCE_ID"
+echo "==> deploy complete: $REF ($RESOLVED_SHA) on $INSTANCE_ID"
