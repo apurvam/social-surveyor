@@ -42,15 +42,17 @@ def test_fetch_produces_story_and_comment_items(tmp_path: Path) -> None:
     assert len(items) == 3
     by_id = {i.platform_id: i for i in items}
 
-    # Story with external URL
+    # Link-story: we monitor the discussion, not the external article,
+    # so URL points to the HN discussion page regardless of whether the
+    # hit carries a third-party URL.
     story = by_id["41234567"]
     assert story.source == "hackernews"
-    assert story.url == "https://example.com/blog/prom-storage"
+    assert story.url == "https://news.ycombinator.com/item?id=41234567"
     assert story.title == "Prometheus long-term storage is expensive"
     assert story.body is None
     assert story.author == "alice"
 
-    # Ask-HN story with no external url: URL falls back to HN item page
+    # Ask-HN story with no external url: same shape — discussion page.
     ask_hn = by_id["41234890"]
     assert ask_hn.url == "https://news.ycombinator.com/item?id=41234890"
     assert ask_hn.body == "Looking at Thanos vs Mimir. Datadog is killing our budget."

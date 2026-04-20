@@ -13,19 +13,22 @@ way to iterate on formatting, and it takes JSON in and renders Slack
 out. Keeping the builders pure means we can paste their output directly
 into the Builder to tweak wording without redeploying anything.
 
-Design notes specific to this session:
+Design notes:
 
 - **Level A only** — standard incoming webhooks. The POST response is
   the literal text ``ok``; there is no message ``ts``, so threading is
-  not available. Collapsed-category detail lives in the CLI (``sv
-  digest --category <cat>``) rather than threaded replies. A future
-  session can graduate to a bot-token Slack app and switch the posting
-  surface without touching these builders.
+  not available. A future session can graduate to a bot-token Slack
+  app and switch the posting surface without touching these builders.
 - **Top-5 per category** — the main digest shows the top 5 items per
   category by urgency (then recency). If a category has more, a hint
-  line in that section points to the CLI inspection command. Keeps
-  the digest's visual footprint consistent day to day regardless of
-  per-category volume.
+  line names the overflow count. Keeps the digest's visual footprint
+  consistent day to day regardless of per-category volume.
+- **No CLI copy-paste lines** — item IDs ship in every card (in a
+  trailing monospace span) but the ``sv label/silence/ingest/digest``
+  commands don't. A coding agent driving the correction workflow can
+  construct the command from the id + intent faster than a human can
+  read the line; the static copy-paste text was noise for both
+  audiences.
 - **Custom emoji are optional** — ``:reddit:`` / ``:hn:`` / ``:twitter:`` /
   ``:github:`` are assumed uploaded to the workspace. If they aren't,
   Slack renders the literal text, which is an acceptable fallback. We
@@ -109,6 +112,14 @@ TITLE_MAX_CHARS = 120
 TITLE_MAX_CHARS_X = 280
 BODY_MAX_CHARS = 200
 
+# Per-item body preview inside the digest. Lets you decide whether to
+# click an HN comment ("Comment by nijave on HN #45809835") without
+# opening it — the preview carries the lead of the comment body.
+# Reddit self-posts, HN stories with self-text, and any other item
+# with a non-empty body also show this. Link-only items (body empty)
+# render with just the title line.
+DIGEST_BODY_PREVIEW_MAX_CHARS = 200
+
 
 def _title_max(source: str) -> int:
     return TITLE_MAX_CHARS_X if source == "x" else TITLE_MAX_CHARS
@@ -132,21 +143,15 @@ _SOURCE_EMOJI: dict[str, str] = {
 
 @dataclass(frozen=True)
 class NotifierConfig:
-    """Project-scoped config the builders need to emit correction commands.
-
-    ``sv_command`` defaults to ``social-surveyor``. Forks that adopt the
-    ``sv`` shell alias (documented in the README) set it to ``"sv"`` so
-    the copy-paste lines are terse.
+    """Project-scoped config the builders need.
 
     ``category_labels`` maps snake_case category ids to the human-
-    friendly labels from ``categories.yaml``. Used anywhere a category
-    is shown for human consumption (section headers, alert headers);
-    the snake_case id is what lands in the ``--category <id>`` code
-    subtexts, because that's what the CLI accepts.
+    friendly labels from ``categories.yaml``. Used in section headers
+    and alert headers so the digest reads in prose rather than in
+    snake_case ids.
     """
 
     project: str
-    sv_command: str = "social-surveyor"
     category_labels: dict[str, str] = field(default_factory=dict)
 
     def category_display(self, category_id: str) -> str:
@@ -229,27 +234,16 @@ def build_immediate_alert(item: NotifierItem, config: NotifierConfig) -> dict[st
     if item.reasoning:
         section_text += f"\n_{_escape_mrkdwn(item.reasoning)}_"
 
-    correction_block = (
-        f"{config.sv_command} label --project {config.project} --item-id {item.item_id} "
-        f"--category <cat> --urgency <n>\n"
-        f"{config.sv_command} silence --project {config.project} --item-id {item.item_id}"
-    )
-
     blocks: list[dict[str, Any]] = [
         {
             "type": "section",
             "text": {"type": "mrkdwn", "text": section_text},
         },
-        {"type": "divider"},
         {
             "type": "context",
             "elements": [
                 {"type": "mrkdwn", "text": f"Item ID: `{item.item_id}`"},
             ],
-        },
-        {
-            "type": "section",
-            "text": {"type": "mrkdwn", "text": f"```\n{correction_block}\n```"},
         },
     ]
 
@@ -270,7 +264,7 @@ def build_digest(
 ) -> dict[str, Any]:
     """Return the Block Kit payload for the daily digest message.
 
-    Structure (spec + session-4 decisions):
+    Structure:
 
     1. Header line with day, counts, alerted-earlier count, and cost
     2. Alerted-earlier section (if any items alerted in the window)
@@ -278,9 +272,7 @@ def build_digest(
        skipping empty categories. Each section shows the top 5 items
        by urgency (then recency), with an overflow hint if the
        category has more than 5.
-    4. Correction footer with the three copy-paste commands
-    5. Cost footer, including a pointer to the ``digest --category``
-       CLI command
+    4. Cost/accuracy footer
     """
     alerted = [i for i in items if i.alerted_at is not None]
     # Alerted-earlier items appear only in their own section, not in
@@ -320,7 +312,7 @@ def build_digest(
     blocks.append(_header_block(top_header_text))
 
     if not items:
-        blocks.extend(_cost_and_correction_footer(stats, config))
+        blocks.extend(_cost_footer(stats))
         return {"blocks": blocks}
 
     # --- alerted-earlier section ---
@@ -354,7 +346,7 @@ def build_digest(
     # --- per-category sections ---
     # Build each category's blocks as a self-contained group so the
     # budget trim at the end can drop whole categories cleanly.
-    footer = _cost_and_correction_footer(stats, config)
+    footer = _cost_footer(stats)
     # Reserve one block for a potential "N categories not shown" context.
     category_budget = SLACK_MAX_BLOCKS - len(blocks) - len(footer) - 1
 
@@ -380,9 +372,7 @@ def build_digest(
                         "type": "mrkdwn",
                         "text": (
                             f"_{len(dropped_categories)} categories not shown "
-                            f"(digest block budget): {dropped_display}. "
-                            f"Run `{config.sv_command} digest --project {config.project} "
-                            f"--category <cat>` for the full list_"
+                            f"(digest block budget): {dropped_display}_"
                         ),
                     }
                 ],
@@ -428,11 +418,7 @@ def _build_category_group(
                 "elements": [
                     {
                         "type": "mrkdwn",
-                        "text": (
-                            f"_{overflow} more {cat} items — run "
-                            f"`{config.sv_command} digest --project "
-                            f"{config.project} --category {cat}` for the full list_"
-                        ),
+                        "text": f"_{overflow} more {cat} items not shown_",
                     }
                 ],
             }
@@ -446,10 +432,11 @@ def _build_category_group(
 def _alerted_earlier_block(item: NotifierItem, config: NotifierConfig) -> dict[str, Any]:
     """Compact single-item block for the 'alerted earlier' digest section.
 
-    Source + human-friendly category, linked title, alerted-at
-    timestamp, trailing monospace ``<item_id>``. Author is omitted —
-    in daily scanning the author name adds little over the title and
-    source; when you click through, the discussion has them anyway.
+    Source + human-friendly category, linked title, optional body
+    preview, alerted-at timestamp, trailing monospace ``<item_id>``.
+    Author is omitted — in daily scanning the author name adds little
+    over the title and source; when you click through, the discussion
+    has them anyway.
     """
     alerted_at = item.alerted_at or item.created_at
     title = _truncate(item.title or "(no title)", _title_max(item.source))
@@ -457,20 +444,26 @@ def _alerted_earlier_block(item: NotifierItem, config: NotifierConfig) -> dict[s
     lines = [
         f"{_source_label(item.source)}  {cat_display}",
         f"> {_linked_title(title, item.url)}",
-        f"_alerted at {alerted_at.strftime('%H:%M')}_",
-        f"`{item.item_id}`",
     ]
+    preview = _body_preview(item)
+    if preview is not None:
+        lines.append(f"> _{preview}_")
+    lines.append(f"_alerted at {alerted_at.strftime('%H:%M')}_")
+    lines.append(f"`{item.item_id}`")
     return {"type": "section", "text": {"type": "mrkdwn", "text": "\n".join(lines)}}
 
 
 def _digest_item_block(item: NotifierItem, config: NotifierConfig) -> dict[str, Any]:
-    """One single-line item inside a category section.
+    """One item inside a category section.
 
-    Source emoji, linked title, trailing monospace item-id. No author,
-    no flag prefix on the id — the id is the one piece of tooling
-    metadata you'd copy into `sv label --item-id <id>` or `sv silence
-    --item-id <id>`, and Slack's code styling is enough to mark it as
-    "this is the paste target."
+    Top line: source emoji, linked title, trailing monospace item-id.
+    When the item has a body (HN comment, Reddit self-post, HN story
+    with self-text), a second italic line carries a 200-char preview
+    so you can decide whether to click without opening the item.
+
+    No author, no flag prefix on the id — the id is the one piece of
+    tooling metadata you'd copy, and Slack's code styling is enough to
+    mark it as "this is the paste target."
 
     X-sourced items get a wider title cap (280 chars) because the
     entire X post fits there — truncating would drop signal we could
@@ -478,11 +471,38 @@ def _digest_item_block(item: NotifierItem, config: NotifierConfig) -> dict[str, 
     """
     silenced_prefix = "🔕 " if item.silenced else ""
     title = _truncate(item.title or "(no title)", _title_max(item.source))
-    line = (
+    first_line = (
         f"{silenced_prefix}{_source_label(item.source)}  "
         f"{_linked_title(title, item.url)}  ·  `{item.item_id}`"
     )
-    return {"type": "section", "text": {"type": "mrkdwn", "text": line}}
+    lines = [first_line]
+    preview = _body_preview(item)
+    if preview is not None:
+        lines.append(f"_{preview}_")
+    return {"type": "section", "text": {"type": "mrkdwn", "text": "\n".join(lines)}}
+
+
+def _body_preview(item: NotifierItem) -> str | None:
+    """Return a DIGEST_BODY_PREVIEW_MAX_CHARS-bounded preview of the item
+    body, or ``None`` when there's nothing useful to show.
+
+    Collapses internal whitespace (newlines, tabs) to single spaces so
+    the preview renders as one line even when the source body is
+    multi-paragraph. Skips the preview when body is empty or
+    substantially identical to the title (Reddit self-posts
+    occasionally duplicate title into selftext; showing both would
+    waste a line).
+    """
+    body = (item.body or "").strip()
+    if not body:
+        return None
+    title = (item.title or "").strip()
+    if title and body.startswith(title):
+        body = body[len(title) :].lstrip(" -—:")
+    if not body:
+        return None
+    flat = " ".join(body.split())
+    return _escape_mrkdwn(_truncate(flat, DIGEST_BODY_PREVIEW_MAX_CHARS))
 
 
 def _linked_title(title: str, url: str | None) -> str:
@@ -520,34 +540,21 @@ def _header_block(text: str) -> dict[str, Any]:
     }
 
 
-def _cost_and_correction_footer(stats: DigestStats, config: NotifierConfig) -> list[dict[str, Any]]:
-    """Shared tail: correction header + code block → cost/accuracy footer."""
-    correction_body = (
-        f"Replace `<id>`, `<cat>`, and `<n>`:\n"
-        f"```\n"
-        f"{config.sv_command} label --project {config.project} "
-        f"--item-id <id> --category <cat> --urgency <n>\n"
-        f"{config.sv_command} silence --project {config.project} --item-id <id>\n"
-        f"{config.sv_command} ingest --project {config.project} --url <url>\n"
-        f"```\n"
-        f"Categories: " + " · ".join(DIGEST_CATEGORY_ORDER)
-    )
-
+def _cost_footer(stats: DigestStats) -> list[dict[str, Any]]:
+    """Tail of every digest: divider + one section with today's cost and
+    labelling accuracy. Correction commands used to live here too; a
+    coding agent driving the correction workflow doesn't need them, so
+    they were removed."""
     accuracy_bit = (
         f" · {stats.accuracy_pct:.1f}% accuracy" if stats.accuracy_pct is not None else ""
     )
     cost_text = (
         f"_Today: ${stats.haiku_cost_usd:.2f} Haiku · "
         f"${stats.x_cost_usd:.2f} X · "
-        f"{stats.total_labeled} items labeled{accuracy_bit}_\n"
-        f"_For full category details: `{config.sv_command} digest "
-        f"--project {config.project} --category <cat>`_"
+        f"{stats.total_labeled} items labeled{accuracy_bit}_"
     )
 
     return [
-        {"type": "divider"},
-        _header_block("✏️ Correct a classification"),
-        {"type": "section", "text": {"type": "mrkdwn", "text": correction_body}},
         {"type": "divider"},
         {"type": "section", "text": {"type": "mrkdwn", "text": cost_text}},
     ]

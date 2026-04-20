@@ -21,8 +21,8 @@ from social_surveyor.notifier import (
 )
 
 
-def _cfg(project: str = "opendata", sv: str = "sv") -> NotifierConfig:
-    return NotifierConfig(project=project, sv_command=sv)
+def _cfg(project: str = "opendata") -> NotifierConfig:
+    return NotifierConfig(project=project)
 
 
 def _item(
@@ -81,16 +81,24 @@ def test_immediate_alert_uses_category_color_attachment() -> None:
     assert isinstance(att["blocks"], list) and att["blocks"]
 
 
-def test_immediate_alert_contains_title_urgency_and_correction_commands() -> None:
-    payload = build_immediate_alert(_item(), _cfg(project="opendata", sv="sv"))
+def test_immediate_alert_contains_title_urgency_and_item_id() -> None:
+    payload = build_immediate_alert(_item(), _cfg(project="opendata"))
     text = _all_text(payload["attachments"][0]["blocks"])
     assert "cost_complaint" in text
     assert "urgency 8" in text
     assert "Datadog costs doubled overnight" in text
-    # Copy-paste correction lines must include both label and silence.
-    assert "sv label --project opendata --item-id hackernews:42" in text
-    assert "sv silence --project opendata --item-id hackernews:42" in text
-    # And the item id shows in its own context block for easy copying.
+    # Item id shows in its own context block for easy copying.
+    assert "hackernews:42" in text
+
+
+def test_immediate_alert_does_not_include_cli_copy_paste_commands() -> None:
+    """CLI copy-paste lines were removed — a coding agent constructs
+    corrections from the item id + intent; the static text was noise."""
+    payload = build_immediate_alert(_item(), _cfg(project="opendata"))
+    text = _all_text(payload["attachments"][0]["blocks"])
+    for needle in ("sv label", "sv silence", "sv ingest", "social-surveyor label"):
+        assert needle not in text
+    # Item id still present — that's the piece a coding agent actually needs.
     assert "hackernews:42" in text
 
 
@@ -146,8 +154,6 @@ def test_digest_empty_day_still_sends_a_message() -> None:
     text = _all_text(payload["blocks"])
     assert "Digest for 2026-04-19" in text
     assert "no new items in the last 24h" in text
-    # Even on empty days the footer still points at the inspection command.
-    assert "sv digest --project opendata --category" in text
 
 
 def test_digest_renders_categories_in_fixed_order() -> None:
@@ -208,7 +214,7 @@ def test_digest_top_n_caps_category_and_shows_overflow_hint() -> None:
             x_cost_usd=0.0,
             total_labeled=0,
         ),
-        _cfg(project="opendata", sv="sv"),
+        _cfg(project="opendata"),
     )
     text = _all_text(payload["blocks"])
     # Header line reflects total count + "showing top N".
@@ -218,9 +224,8 @@ def test_digest_top_n_caps_category_and_shows_overflow_hint() -> None:
     # Top-urgency item present, lowest-urgency item not.
     assert "active item 0" in text  # urgency 10
     assert "active item 7" not in text  # urgency 3, below the top-5 cut
-    # Overflow hint names the CLI command.
+    # Overflow hint names the leftover count; CLI pointer was removed.
     assert "3 more active_practitioner items" in text
-    assert "sv digest --project opendata --category active_practitioner" in text
 
 
 def test_digest_no_overflow_hint_when_under_cap() -> None:
@@ -289,7 +294,7 @@ def test_digest_silenced_within_window_shows_marker() -> None:
     assert "noisy tutorial" in text
 
 
-def test_digest_cost_footer_includes_accuracy_and_cli_pointer() -> None:
+def test_digest_cost_footer_includes_accuracy() -> None:
     payload = build_digest(
         [_item()],
         DigestStats(
@@ -299,15 +304,33 @@ def test_digest_cost_footer_includes_accuracy_and_cli_pointer() -> None:
             total_labeled=143,
             accuracy_pct=61.5,
         ),
-        _cfg(project="opendata", sv="sv"),
+        _cfg(project="opendata"),
     )
     text = _all_text(payload["blocks"])
     assert "$0.12 Haiku" in text
     assert "$0.15 X" in text
     assert "143 items labeled" in text
     assert "61.5% accuracy" in text
-    # Pointer to the category-inspection CLI command.
-    assert "sv digest --project opendata --category" in text
+
+
+def test_digest_does_not_include_cli_copy_paste_commands() -> None:
+    """The digest no longer carries the per-category CLI inspection
+    pointer, the category listing, or the correction footer block."""
+    payload = build_digest(
+        [_item()],
+        DigestStats(day=date(2026, 4, 19), haiku_cost_usd=0, x_cost_usd=0, total_labeled=1),
+        _cfg(project="opendata"),
+    )
+    text = _all_text(payload["blocks"])
+    for needle in (
+        "sv label",
+        "sv silence",
+        "sv ingest",
+        "sv digest --project",
+        "social-surveyor label",
+        "Correct a classification",
+    ):
+        assert needle not in text
 
 
 def test_digest_uses_header_blocks_for_hierarchy() -> None:
@@ -333,8 +356,6 @@ def test_digest_uses_header_blocks_for_hierarchy() -> None:
     # Per-category headers for both populated categories.
     assert any("cost_complaint" in h for h in headers)
     assert any("off_topic" in h for h in headers)
-    # Correction header in the footer.
-    assert any("Correct a classification" in h for h in headers)
 
 
 def test_digest_item_title_is_hyperlinked_to_url() -> None:
@@ -442,6 +463,90 @@ def test_digest_x_items_allow_up_to_280_chars() -> None:
     assert "…" in text2
 
 
+def test_digest_item_includes_body_preview_when_body_present() -> None:
+    """HN comments (and any other item with a non-empty body) get a
+    200-char italic preview line under the linked title. Lets a reader
+    decide whether to click without opening the item."""
+    item = _item(
+        title="Comment by nijave on HN #45809835",
+        body="Datadog's pricing made sense when we were 1/10 the size. At current volume it's the single biggest line item.",
+    )
+    payload = build_digest(
+        [item],
+        DigestStats(day=date(2026, 4, 19), haiku_cost_usd=0, x_cost_usd=0, total_labeled=0),
+        _cfg(),
+    )
+    text = _all_text(payload["blocks"])
+    assert "Datadog's pricing made sense when we were 1/10 the size" in text
+
+
+def test_digest_item_body_preview_truncated_for_long_body() -> None:
+    long_body = "A" * 500
+    item = _item(title="some title", body=long_body)
+    payload = build_digest(
+        [item],
+        DigestStats(day=date(2026, 4, 19), haiku_cost_usd=0, x_cost_usd=0, total_labeled=0),
+        _cfg(),
+    )
+    text = _all_text(payload["blocks"])
+    assert long_body not in text
+    assert "…" in text
+
+
+def test_digest_item_body_preview_collapses_internal_whitespace() -> None:
+    """Multi-paragraph bodies render as one flat preview line so the
+    card stays compact."""
+    item = _item(
+        title="some title",
+        body="First paragraph.\n\nSecond paragraph\nwith a wrapped line.",
+    )
+    payload = build_digest(
+        [item],
+        DigestStats(day=date(2026, 4, 19), haiku_cost_usd=0, x_cost_usd=0, total_labeled=0),
+        _cfg(),
+    )
+    text = _all_text(payload["blocks"])
+    assert "First paragraph. Second paragraph with a wrapped line." in text
+
+
+def test_digest_item_without_body_has_no_preview_line() -> None:
+    """Link-only posts (body empty) keep the single-line layout — no
+    empty italic stub."""
+    item = _item(title="A link-only story", body=None)
+    payload = build_digest(
+        [item],
+        DigestStats(day=date(2026, 4, 19), haiku_cost_usd=0, x_cost_usd=0, total_labeled=0),
+        _cfg(),
+    )
+    # Find the item block and confirm it's one line only (no trailing
+    # italic preview line).
+    item_sections = [
+        b
+        for b in payload["blocks"]
+        if b.get("type") == "section"
+        and isinstance(b.get("text"), dict)
+        and "A link-only story" in b["text"].get("text", "")
+    ]
+    assert len(item_sections) == 1
+    assert "\n" not in item_sections[0]["text"]["text"]
+
+
+def test_digest_alerted_earlier_block_includes_body_preview() -> None:
+    alerted = _item(
+        item_id="hackernews:500",
+        title="Comment by apurvamehta on HN #47798319",
+        body="We tried the OTel collector on EKS and the memory footprint was rough until we tuned the batch processor.",
+        alerted_at=datetime(2026, 4, 19, 9, 0, tzinfo=UTC),
+    )
+    payload = build_digest(
+        [alerted],
+        DigestStats(day=date(2026, 4, 19), haiku_cost_usd=0, x_cost_usd=0, total_labeled=0),
+        _cfg(),
+    )
+    text = _all_text(payload["blocks"])
+    assert "We tried the OTel collector on EKS" in text
+
+
 def test_digest_items_do_not_include_author() -> None:
     """Author is dropped from per-item lines (low signal; title +
     source do the work)."""
@@ -458,11 +563,9 @@ def test_digest_items_do_not_include_author() -> None:
 def test_digest_uses_human_category_labels_when_available() -> None:
     """When category_labels is populated, section headers and the
     alerted-earlier block show the human-friendly label, not the
-    snake_case id. The code subtext still uses the id (the CLI accepts
-    only ids)."""
+    snake_case id."""
     cfg = NotifierConfig(
         project="opendata",
-        sv_command="sv",
         category_labels={
             "cost_complaint": "Observability cost complaint",
             "self_host_intent": "Self-host Prometheus intent",
@@ -486,11 +589,8 @@ def test_digest_uses_human_category_labels_when_available() -> None:
     text = _all_text(payload["blocks"])
     # Section header uses the label.
     assert "Observability cost complaint" in text
-    # The snake_case id still appears in the footer's "Categories: ..."
-    # listing (that's where the list of valid ids lives, since users
-    # need to type an id for --category <id>).
-    assert "cost_complaint" in text
-    # But NOT in per-item subtexts — those only carry --item-id now.
+    # The snake_case id doesn't appear in any per-item subtext — those
+    # carry only the item id now.
     assert "--category cost_complaint" not in text
 
 
@@ -516,18 +616,6 @@ def test_digest_category_header_singular_vs_plural() -> None:
     )
     assert "· 1 item" in single and "· 1 items" not in single
     assert "· 2 items" in plural
-
-
-def test_digest_correction_footer_lists_all_three_commands() -> None:
-    payload = build_digest(
-        [_item()],
-        DigestStats(day=date(2026, 4, 19), haiku_cost_usd=0, x_cost_usd=0, total_labeled=0),
-        _cfg(project="opendata", sv="sv"),
-    )
-    text = _all_text(payload["blocks"])
-    assert "sv label --project opendata" in text
-    assert "sv silence --project opendata" in text
-    assert "sv ingest --project opendata" in text
 
 
 # --- digest block-cap guards -------------------------------------------------

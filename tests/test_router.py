@@ -324,14 +324,14 @@ def test_send_pending_immediate_alerts_posts_and_marks_sent(tmp_path: Path) -> N
         route_classifications(db, _cfg())
         sent = send_pending_immediate_alerts(
             db,
-            notifier_cfg=NotifierConfig(project="demo", sv_command="sv"),
+            notifier_cfg=NotifierConfig(project="demo"),
             webhook_url="https://hooks.example/A/B/C",
             client=client,
         )
         # Second pass: nothing pending; no POSTs.
         sent_again = send_pending_immediate_alerts(
             db,
-            notifier_cfg=NotifierConfig(project="demo", sv_command="sv"),
+            notifier_cfg=NotifierConfig(project="demo"),
             webhook_url="https://hooks.example/A/B/C",
             client=client,
         )
