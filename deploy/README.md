@@ -212,14 +212,51 @@ survive; clean those up with `aws ssm delete-parameters-by-path` and
 
 ---
 
-## Redeploy (5a: manual)
+## Redeploy
 
-Until 5a-polish lands `deploy.sh`, a redeploy is:
+### From the laptop — `deploy/deploy.sh` (preferred)
+
+Once a release tag exists on `origin`, one command deploys it:
 
 ```bash
-# on the instance, via SSM:
+AWS_PROFILE=prod deploy/deploy.sh v0.6.0
+```
+
+What the script does:
+
+1. Validates the working tree is clean (`--dirty` to override) and the
+   tag exists both locally and on `origin`.
+2. Resolves the instance id from `SOCIAL_SURVEYOR_INSTANCE_ID` or
+   `pulumi stack output instance_id`.
+3. Sends a single `aws ssm send-command` invocation that runs, on the
+   instance:
+   `git fetch --tags && git checkout <tag> && uv sync && systemctl
+   restart social-surveyor@<project>`, then tails the last 20 lines
+   of journald for the unit.
+4. Polls the invocation to completion and streams stdout + stderr
+   back. Exits non-zero on any remote failure.
+
+Useful flags:
+
+```bash
+deploy/deploy.sh --help
+deploy/deploy.sh v0.6.0 --dry-run              # print the remote command, don't SSM
+deploy/deploy.sh v0.6.0 --project agent-infra  # deploy a different systemd instance
+deploy/deploy.sh HEAD-tag --dirty              # skip the clean-tree check
+```
+
+### Fallback — manual SSM
+
+If `deploy/deploy.sh` fails (AWS outage, SSM agent unhappy, odd git
+state), fall back to the manual path:
+
+```bash
+AWS_PROFILE=prod aws ssm start-session --target <instance-id> --region us-west-2
+
+# on the instance:
 cd /opt/social-surveyor
-sudo -u social-surveyor git pull
+sudo -u social-surveyor git fetch --tags
+sudo -u social-surveyor git checkout <tag>     # or: git pull for a branch tip
 sudo -u social-surveyor uv sync
 sudo systemctl restart social-surveyor@opendata
 ```
