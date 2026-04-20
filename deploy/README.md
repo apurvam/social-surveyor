@@ -277,33 +277,37 @@ survive; clean those up with `aws ssm delete-parameters-by-path` and
 
 ### From the laptop — `deploy/deploy.sh` (preferred)
 
-Once a release tag exists on `origin`, one command deploys it:
+One command, any git ref — no release tags required:
 
 ```bash
-AWS_PROFILE=prod deploy/deploy.sh v0.6.0
+AWS_PROFILE=prod deploy/deploy.sh                  # deploys origin/main HEAD
+AWS_PROFILE=prod deploy/deploy.sh v0.6.0           # deploys a tag
+AWS_PROFILE=prod deploy/deploy.sh fix/hotfix       # deploys a branch tip
+AWS_PROFILE=prod deploy/deploy.sh abc1234          # deploys a specific commit
 ```
 
 What the script does:
 
-1. Validates the working tree is clean (`--dirty` to override) and the
-   tag exists both locally and on `origin`.
-2. Resolves the instance id from `SOCIAL_SURVEYOR_INSTANCE_ID` or
+1. Validates the working tree is clean (`--dirty` to override).
+2. Resolves the ref to a concrete SHA locally — tag, `origin/<branch>`,
+   or commit all work. For tags, also verifies the tag is on origin so
+   a local-only tag doesn't silently fail the remote checkout.
+3. Resolves the instance id from `SOCIAL_SURVEYOR_INSTANCE_ID` or
    `pulumi stack output instance_id`.
-3. Sends a single `aws ssm send-command` invocation that runs, on the
-   instance:
-   `git fetch --tags && git checkout <tag> && uv sync && systemctl
-   restart social-surveyor@<project>`, then tails the last 20 lines
-   of journald for the unit.
-4. Polls the invocation to completion and streams stdout + stderr
+4. Sends a single `aws ssm send-command` invocation that, on the
+   instance, fetches, checks out the resolved SHA detached, runs
+   `uv sync`, restarts `social-surveyor@<project>`, and tails the
+   last 20 lines of journald.
+5. Polls the invocation to completion and streams stdout + stderr
    back. Exits non-zero on any remote failure.
 
 Useful flags:
 
 ```bash
 deploy/deploy.sh --help
-deploy/deploy.sh v0.6.0 --dry-run              # print the remote command, don't SSM
-deploy/deploy.sh v0.6.0 --project agent-infra  # deploy a different systemd instance
-deploy/deploy.sh HEAD-tag --dirty              # skip the clean-tree check
+deploy/deploy.sh --dry-run                    # print the remote command, don't SSM
+deploy/deploy.sh v0.6.0 --project agent-infra # deploy a different systemd instance
+deploy/deploy.sh main --dirty                 # skip the clean-tree check
 ```
 
 ### Fallback — manual SSM
