@@ -1,12 +1,57 @@
-# Copy this file to Pulumi.opendata.yaml and fill in the values for your
-# AWS account. Do not commit Pulumi.opendata.yaml — it contains account-
-# specific infrastructure IDs. The real file is gitignored.
+# Pulumi stack config for social-surveyor.
+#
+# Copy this file to Pulumi.<project>.yaml and fill in the values for
+# your AWS account. The real file is gitignored — it contains
+# account-specific infrastructure identifiers (VPC / subnet).
+#
+# Stack naming: the Pulumi stack name should match your project name
+# (the directory under projects/<project>/), e.g. `opendata` →
+# `Pulumi.opendata.yaml` → `pulumi stack select opendata`.
+
 config:
-  aws:region: us-west-2  # whichever region your VPC lives in
+  # Region in which the EC2 instance, IAM role, and DLM policy live.
+  # Pick the same region as your existing VPC to avoid cross-region
+  # complexity; the program does not support spanning regions.
+  aws:region: us-west-2
+
+  # --- Per-project identity ---
+  # Name of the project under projects/<name>/ — drives every other
+  # identifier: IAM role name, security group name, systemd template
+  # instance (social-surveyor@<name>), DLM Snapshot target tag, and
+  # the SSM prefix below. No spaces; lowercase.
+  social-surveyor:project_name: opendata
+
+  # --- Networking (existing VPC) ---
+  # The program does NOT create a VPC. Re-use whatever you already
+  # have. `subnet_id` must be reachable from SSM:
+  #  - Public subnet: works out of the box (instance gets a public IP
+  #    and talks to SSM over the internet gateway).
+  #  - Private subnet: requires either a NAT gateway or VPC endpoints
+  #    for com.amazonaws.<region>.ssm / ssmmessages / ec2messages.
+  #    Not tested in 5a.
   social-surveyor:vpc_id: vpc-REPLACE_ME
   social-surveyor:subnet_id: subnet-REPLACE_ME
+
+  # --- Instance shape ---
+  # t4g.micro (ARM64, 2 vCPU, 1 GB RAM) is plenty for one social
+  # project running the scheduler + Haiku calls. Free tier gives 750
+  # hr/month for the first 12 months of an account. For multiple
+  # projects on one instance, bump to t4g.small.
   social-surveyor:instance_type: t4g.micro
-  social-surveyor:project_name: opendata
+
+  # --- Secret storage prefix ---
+  # The instance IAM role is scoped to read only under this SSM prefix.
+  # `deploy/seed-ssm.sh` writes every KEY from your local .env to
+  # <prefix>/<KEY> as a SecureString. The systemd unit then sets
+  # SOCIAL_SURVEYOR_SSM_PREFIX=<prefix>, which is the opt-in signal
+  # for secrets.resolve_secret's SSM fallback.
+  # Convention: /social-surveyor/<project_name>
   social-surveyor:ssm_parameter_prefix: /social-surveyor/opendata
-  # Optional — leave blank to rely entirely on SSM for instance access
+
+  # --- Optional: SSH keypair ---
+  # Leave empty (the default) to rely on SSM Session Manager for all
+  # access — recommended, since the security group has no inbound
+  # rules. Set to an existing EC2 keypair name if you want `ssh`
+  # access as a backup (but you'd also need to add port-22 ingress
+  # yourself; the program does not).
   social-surveyor:ssh_key_name: ""

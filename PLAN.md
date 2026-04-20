@@ -342,13 +342,62 @@ Session 4 deferred: `deploy.sh` SSM automation, `secrets.resolve_secret` SSM fal
 
 ### Session 5a-polish — Complete the deferred items
 
-Short follow-on to 5a, run after the first successful digest fires. ~1 hour.
+**Status:** Complete, shipped 2026-04-20 across PRs #7, #8, #9, #10. All
+four deferred items landed; `Pulumi.opendata.example.yaml` polish
+deferred as a trivial follow-up (see below).
 
-- `deploy.sh` that rsyncs repo, runs `uv sync`, restarts systemd unit; runnable locally or via SSM
-- `secrets.resolve_secret` with SSM fallback per the Session 4 deferral note
-- EBS snapshot lifecycle policy (weekly) — can be added to Pulumi program or set directly via AWS CLI
-- Haiku token cost cap enforcement: pre-classify check in `classifier.py` that sums today's `api_usage` Haiku tokens, halts + logs if over `routing_cfg.cost_caps.daily_haiku_tokens`
-- `Pulumi.opendata.example.yaml` polish — comments, realistic placeholder values
+**Acceptance — met:**
+- [x] Haiku token cost cap enforcement in `cost_caps.py` — UTC-day
+  sum of input+output tokens; halts classification + pages infra
+  channel (exactly once per day via `infra_alerts` idempotency table);
+  warns at 80% of cap. `opendata` cap set to 2.2M tokens, derived
+  from first post-deploy 24h (~1.1M, backfill-inflated) doubled —
+  revisit downward once steady-state is observed.
+- [x] `deploy/deploy.sh` — accepts tag, branch, or commit SHA;
+  defaults to `origin/main` HEAD; resolves locally to a SHA so the
+  remote checkout matches the laptop's view. `--dry-run` / `--dirty`
+  / `--project` flags. Tests cover all four invocation shapes.
+- [x] `secrets.resolve_secret` SSM fallback — env-first unchanged,
+  SSM opt-in via `SOCIAL_SURVEYOR_SSM_PREFIX` env var, per-process
+  cache keyed on `(prefix, name)`. Systemd unit sets the prefix on
+  the instance. `boto3` added as a dependency.
+- [x] EBS snapshot lifecycle — DLM policy fires weekly Sunday 02:00
+  UTC, retains 4 snapshots. Root volume tagged `Snapshot=<project>`
+  so multi-project accounts stay scoped. Manual restore outline in
+  `deploy/README.md`.
+
+**Acceptance — met in docs follow-up (PR #11):**
+- [x] `Pulumi.opendata.example.yaml` polish — expanded per-field
+  comments cover what each value drives (project_name identity,
+  subnet reachability from SSM, SSM prefix ↔ secrets fallback,
+  keypair opt-in), plus a stack-naming convention note.
+
+**Runtime gotchas encountered (documented to save future debugging):**
+- SSM's `AWS-RunShellScript` runs commands under `/bin/sh` (dash on
+  Ubuntu), not bash. Scripts using `set -o pipefail` or other
+  bash-isms need to be wrapped in `bash -c`. `deploy.sh` uses a
+  base64 → bash pattern; surfaced on first live deploy and fixed in
+  PR #10.
+- Pulumi `aws.dlm.LifecyclePolicy` Python SDK (v6.83) rejects
+  `interval_unit="WEEKS"` (only HOURS) and types `create_rule.times`
+  as a single str despite the docs suggesting a list. Use a cron
+  expression (`cron(0 2 ? * SUN *)`) and typed Args classes rather
+  than raw dicts. PR #8.
+
+**Follow-ons (not blocking):**
+- **Revisit Haiku cap value.** 2.2M is intentionally loose to avoid
+  false-halt on backfills. After ~1 week of non-backfill operation,
+  tune down to whatever steady-state + 2x buffer suggests (projected:
+  200-500k range).
+- **`social-surveyor-load-env` is now redundant.** The SSM fallback
+  in `resolve_secret` makes the env-file marshaling unnecessary, but
+  the bootstrap script and systemd unit still use it. Belt-and-
+  suspenders is fine for now; remove in a session that already
+  touches bootstrap/systemd to avoid a single-purpose change.
+- **Infra Slack channel.** `OPENDATA_SLACK_WEBHOOK_INFRA` env is
+  optional; when unset, cost-cap alerts land in the immediate
+  channel with a `[INFRA]` prefix. Operator can create a dedicated
+  channel + webhook later and seed into SSM (no code change needed).
 
 ### Session 5b — CI/CD
 
@@ -462,6 +511,9 @@ Updated as sessions reveal new decisions. Current open items:
 - **Silent per-source failures.** Our multi-source poll catches exceptions and logs `poll.source.failed`, which covers crashing sources. It does *not* catch silent failures (a source that starts returning `[]` because an upstream API schema changed, or a hang where no timeout fires). Session 5's `/health` endpoint will track "last successful poll per source per project" so staleness alerts catch these; until then, eyeball the per-source row counts periodically.
 - **Category taxonomy stability.** Categories defined in Session 2.75's `categories.yaml` will be used by both the labeler and (in Session 3) the classifier. Renaming or restructuring categories after labeling has started invalidates prior labels. Treat the taxonomy as a decision to be made deliberately early and then held stable; if it must change, there should be a migration step in the change. **Note from Session 3 iteration:** even adding a new category (without renaming existing ones) requires a full relabel pass across all potentially-affected source categories, not just the obvious donor. Label drift across untouched categories will show up as apparent classifier regressions in subsequent evals. See the "Taxonomy changes trigger a full relabel pass" convention.
 - **Deployment identifiers in git history.** `Pulumi.opendata.example.yaml` is committed as a template with placeholder values; the real `Pulumi.opendata.yaml` with VPC/subnet IDs is gitignored. This is the conservative choice for a public repo. If the project ever moves to private or a multi-deployer model, revisit — committing real values makes forking easier at the cost of revealing infrastructure identifiers.
+- **Haiku daily cost cap value.** Set to 2,200,000 tokens in Session 5a-polish, derived from the first post-deploy 24h (which was dominated by an initial backfill of ~440 items). Steady-state is projected at <100k tokens/day, so the cap has ~20x headroom. After a week of non-backfill operation, tune downward to something closer to (observed steady-state) × 2 — likely 200-500k. Revisit the value alongside whatever session is next touching `routing.yaml`.
+- **Infra Slack channel.** `routing.infra.webhook_secret` is optional; if unset, cost-cap alerts land in the immediate channel with a `[INFRA]` prefix. Operator can create `#social-surveyor-infra` (or similar) in Slack, seed the webhook into SSM as `OPENDATA_SLACK_WEBHOOK_INFRA`, and the cost-cap path picks it up on the next classify tick with no code change. Also relevant for Session 5c's staleness alerts.
+- **`social-surveyor-load-env` redundancy.** Session 5a-polish's SSM fallback in `resolve_secret` makes the bootstrap's env-file marshaling unnecessary. The helper is still installed and the systemd unit still sources `/etc/social-surveyor/%i.env` — kept as belt-and-suspenders. Remove in a future session that already touches `deploy/bootstrap-ec2.sh` or `deploy/social-surveyor@.service` to avoid a single-purpose cleanup commit.
 
 ---
 
