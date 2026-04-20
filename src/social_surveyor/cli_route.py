@@ -36,7 +36,6 @@ def run_route(
     projects_root: Path,
     *,
     dry_run: bool,
-    sv_command: str = "social-surveyor",
     echo_fn: Any = typer.echo,
     http_client: Any = None,
 ) -> dict[str, int]:
@@ -60,7 +59,6 @@ def run_route(
 
     notifier_cfg = NotifierConfig(
         project=project,
-        sv_command=sv_command,
         category_labels=category_labels,
     )
 

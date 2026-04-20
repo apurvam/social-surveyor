@@ -51,7 +51,6 @@ def run_digest(
     category: str | None = None,
     since: datetime | None = None,
     limit: int | None = None,
-    sv_command: str = "social-surveyor",
     echo_fn: Any = typer.echo,
     http_client: Any = None,
 ) -> dict[str, Any]:
@@ -83,7 +82,6 @@ def run_digest(
 
     notifier_cfg = NotifierConfig(
         project=project,
-        sv_command=sv_command,
         category_labels=category_labels,
     )
 
