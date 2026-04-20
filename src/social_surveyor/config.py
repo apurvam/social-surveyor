@@ -267,13 +267,35 @@ class DigestConfig(BaseModel):
 
 
 class CostCapsConfig(BaseModel):
-    """Hard daily ceilings. Session 4 parses these; full enforcement is
-    a follow-on — X already has its own ``daily_read_cap`` today."""
+    """Hard daily ceilings. ``daily_haiku_tokens`` is enforced by the
+    cost-cap check that runs at the start of every classify invocation;
+    ``daily_x_reads`` is enforced by the X source's own per-call
+    preflight (Session 2)."""
 
     model_config = ConfigDict(extra="forbid")
 
     daily_haiku_tokens: int = Field(default=500_000, ge=0)
     daily_x_reads: int = Field(default=2_000, ge=0)
+
+
+class InfraConfig(BaseModel):
+    """Operator-facing channel for infra events (cost-cap halts, later
+    session 5c staleness alerts). Distinct from the business
+    ``immediate``/``digest`` webhooks so content and ops don't share a
+    channel. Optional: if ``webhook_secret`` is unset, the cost-cap
+    path falls back to the immediate webhook with a ``[INFRA]`` prefix.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    webhook_secret: str | None = Field(
+        default=None,
+        description=(
+            "Env/SSM name holding the infra-channel incoming webhook URL. "
+            "Optional — when unset, infra alerts fall back to the immediate "
+            "webhook with a [INFRA] prefix so the operator still gets paged."
+        ),
+    )
 
 
 class RoutingConfig(BaseModel):
@@ -285,6 +307,7 @@ class RoutingConfig(BaseModel):
     immediate: ImmediateConfig
     digest: DigestConfig
     cost_caps: CostCapsConfig = Field(default_factory=CostCapsConfig)
+    infra: InfraConfig = Field(default_factory=InfraConfig)
 
 
 class ProjectConfig(BaseModel):

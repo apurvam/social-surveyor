@@ -1,9 +1,17 @@
-# Deploy runbook — social-surveyor on EC2 (Session 5a)
+# Deploy runbook — social-surveyor on EC2
 
-Minimal production deploy: one t4g.micro behind an IAM role, polling
-on cron inside a single Python process, secrets in SSM Parameter
-Store. No CI/CD, no health endpoint, no automated rsync — those come
-in 5a-polish, 5b, and 5c.
+One t4g.micro behind an IAM role, polling on cron inside a single
+Python process, secrets in SSM Parameter Store. `/health` and
+CI/CD come in 5b and 5c. Session 5a-polish adds:
+
+- **Haiku daily token cost cap** — enforced in the classifier; halts
+  classification until UTC midnight when today's input+output tokens
+  cross `routing.cost_caps.daily_haiku_tokens`, and pages the infra
+  channel exactly once per day.
+- **`deploy/deploy.sh`** — one-command tag-based deploy over SSM.
+- **SSM Parameter Store fallback in `resolve_secret`** — belt-and-
+  suspenders on top of the `EnvironmentFile` path for production.
+- **Weekly EBS snapshots** — DLM-managed, 4 retained, Sunday 02:00 UTC.
 
 If you are reforking this repo for your own project, copy
 `Pulumi.opendata.example.yaml` to `Pulumi.<yourproject>.yaml` and
@@ -180,6 +188,59 @@ sudo -u social-surveyor bash -c \
 
 ---
 
+## Backup and recovery
+
+The Pulumi stack creates a Data Lifecycle Manager (DLM) policy that
+snapshots any volume tagged `Snapshot=<project_name>` (the instance's
+root volume is tagged at create-time). Defaults:
+
+- **Cadence:** Sunday 02:00 UTC
+- **Retention:** 4 snapshots (~one month of point-in-time recovery)
+- **Cost:** DLM itself is free; snapshot storage on a 10 GB root is
+  around **$0.05/GB/month × 4 snapshots × 10 GB ≈ $2/year**
+
+Verify the policy is active after `pulumi up`:
+
+```bash
+AWS_PROFILE=prod aws dlm get-lifecycle-policies --region us-west-2
+AWS_PROFILE=prod pulumi stack output dlm_policy_id
+```
+
+First snapshot appears the next Sunday 02:00 UTC. To see snapshots once
+they start accumulating:
+
+```bash
+AWS_PROFILE=prod aws ec2 describe-snapshots --region us-west-2 \
+    --owner-ids self \
+    --filters "Name=tag:SnapshotOf,Values=opendata" \
+    --query 'Snapshots[].[SnapshotId,StartTime,VolumeSize,State]' \
+    --output table
+```
+
+### Restoring from a snapshot
+
+Restore is a manual operation. Automation is deferred: picking the
+right snapshot and verifying data integrity needs a human in the loop,
+and the frequency (hopefully zero times per year) doesn't justify the
+script.
+
+Outline:
+
+1. Pick a snapshot: `aws ec2 describe-snapshots --filters ...` (see above)
+2. Stop the service: on the instance, `sudo systemctl stop social-surveyor@opendata`
+3. Create a new volume from the snapshot (same AZ as the instance):
+   `aws ec2 create-volume --snapshot-id snap-... --volume-type gp3
+    --availability-zone us-west-2a`
+4. Stop the instance, detach the current root volume, attach the new
+   one as root, start the instance. (Or — for a non-root data restore,
+   mount at a fresh mount point and copy the SQLite file over.)
+5. Start the service: `sudo systemctl start social-surveyor@opendata`
+
+Expect ~10 minutes hands-on time, plus however long AWS takes to
+materialize the new volume.
+
+---
+
 ## Rollback
 
 ```bash
@@ -212,14 +273,51 @@ survive; clean those up with `aws ssm delete-parameters-by-path` and
 
 ---
 
-## Redeploy (5a: manual)
+## Redeploy
 
-Until 5a-polish lands `deploy.sh`, a redeploy is:
+### From the laptop — `deploy/deploy.sh` (preferred)
+
+Once a release tag exists on `origin`, one command deploys it:
 
 ```bash
-# on the instance, via SSM:
+AWS_PROFILE=prod deploy/deploy.sh v0.6.0
+```
+
+What the script does:
+
+1. Validates the working tree is clean (`--dirty` to override) and the
+   tag exists both locally and on `origin`.
+2. Resolves the instance id from `SOCIAL_SURVEYOR_INSTANCE_ID` or
+   `pulumi stack output instance_id`.
+3. Sends a single `aws ssm send-command` invocation that runs, on the
+   instance:
+   `git fetch --tags && git checkout <tag> && uv sync && systemctl
+   restart social-surveyor@<project>`, then tails the last 20 lines
+   of journald for the unit.
+4. Polls the invocation to completion and streams stdout + stderr
+   back. Exits non-zero on any remote failure.
+
+Useful flags:
+
+```bash
+deploy/deploy.sh --help
+deploy/deploy.sh v0.6.0 --dry-run              # print the remote command, don't SSM
+deploy/deploy.sh v0.6.0 --project agent-infra  # deploy a different systemd instance
+deploy/deploy.sh HEAD-tag --dirty              # skip the clean-tree check
+```
+
+### Fallback — manual SSM
+
+If `deploy/deploy.sh` fails (AWS outage, SSM agent unhappy, odd git
+state), fall back to the manual path:
+
+```bash
+AWS_PROFILE=prod aws ssm start-session --target <instance-id> --region us-west-2
+
+# on the instance:
 cd /opt/social-surveyor
-sudo -u social-surveyor git pull
+sudo -u social-surveyor git fetch --tags
+sudo -u social-surveyor git checkout <tag>     # or: git pull for a branch tip
 sudo -u social-surveyor uv sync
 sudo systemctl restart social-surveyor@opendata
 ```

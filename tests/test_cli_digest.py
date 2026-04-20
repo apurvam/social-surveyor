@@ -288,10 +288,13 @@ def test_digest_since_filter_is_parsed(tmp_path: Path) -> None:
 
 def test_digest_requires_routing_yaml(tmp_path: Path) -> None:
     projects_root = _write_project_configs(tmp_path)
+    # _write_project_configs now emits a default routing.yaml so the
+    # classify path can load cost-caps; for this test we want the
+    # missing-file path, so drop it back off.
+    (projects_root / "demo" / "routing.yaml").unlink()
     db_path = tmp_path / "data" / "demo.db"
     with Storage(db_path) as db:
         _seed_item_and_classification(db, item_id="hackernews:1", category="off_topic", urgency=0)
-    # No routing.yaml written → should fail cleanly.
     with pytest.raises(typer.BadParameter, match=r"routing\.yaml"):
         run_digest(
             "demo",

@@ -15,6 +15,15 @@ EnvironmentFile=/etc/social-surveyor/%i.env
 # deploys don't touch them.
 Environment="SOCIAL_SURVEYOR_DATA_DIR=/var/lib/social-surveyor/%i"
 
+# SSM Parameter Store fallback for secrets.resolve_secret. When set,
+# the resolver tries this SSM prefix if a name isn't in the process
+# env. Belt-and-suspenders alongside the EnvironmentFile path: the
+# bootstrap's social-surveyor-load-env helper pre-fills the env file
+# from SSM, so steady-state hits the env path; SSM is the fallback
+# for names the operator forgot to add to SSM / the env file, or
+# secrets rotated without re-seeding.
+Environment="SOCIAL_SURVEYOR_SSM_PREFIX=/social-surveyor/%i"
+
 # ExecStartPre with '+' prefix runs as root (needed for chown).
 ExecStartPre=+/bin/mkdir -p /var/lib/social-surveyor/%i
 ExecStartPre=+/bin/chown -R social-surveyor:social-surveyor /var/lib/social-surveyor/%i

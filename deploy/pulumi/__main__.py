@@ -98,9 +98,7 @@ ssm_parameter_read_policy = json.dumps(
                 "Effect": "Allow",
                 "Action": ["kms:Decrypt"],
                 "Resource": "*",
-                "Condition": {
-                    "StringEquals": {"kms:ViaService": f"ssm.{region}.amazonaws.com"}
-                },
+                "Condition": {"StringEquals": {"kms:ViaService": f"ssm.{region}.amazonaws.com"}},
             },
         ],
     }
@@ -131,9 +129,7 @@ ebs_snapshot_policy = json.dumps(
                 "Effect": "Allow",
                 "Action": ["ec2:CreateSnapshot", "ec2:CreateTags"],
                 "Resource": "*",
-                "Condition": {
-                    "StringEquals": {"aws:ResourceTag/Project": "social-surveyor"}
-                },
+                "Condition": {"StringEquals": {"aws:ResourceTag/Project": "social-surveyor"}},
             },
         ],
     }
@@ -196,6 +192,11 @@ instance_kwargs: dict = {
             "Name": f"social-surveyor-{project_name}-root",
             "Project": "social-surveyor",
             "ManagedBy": "pulumi",
+            # DLM target tag — the lifecycle policy below targets volumes
+            # matching (Snapshot=<project_name>), so the snapshot set is
+            # scoped to this stack even if the account hosts multiple
+            # social-surveyor projects.
+            "Snapshot": project_name,
         },
     },
     "tags": {
@@ -210,6 +211,72 @@ if ssh_key_name:
 
 instance = aws.ec2.Instance("social-surveyor", **instance_kwargs)
 
+# --- EBS snapshot lifecycle (DLM) ---
+# Weekly snapshots of any volume tagged Snapshot=<project_name>, kept
+# for 4 weeks. DLM is free; snapshot storage is ~$0.05/GB/month (our
+# 10 GB root → ~$2/year total). Restoring from a snapshot is a manual
+# operation; we don't automate that here because verifying data
+# integrity against a restored volume needs a human in the loop.
+
+dlm_service_role = aws.iam.Role(
+    "dlm-service-role",
+    name=f"social-surveyor-{project_name}-dlm-service",
+    assume_role_policy=json.dumps(
+        {
+            "Version": "2012-10-17",
+            "Statement": [
+                {
+                    "Effect": "Allow",
+                    "Principal": {"Service": "dlm.amazonaws.com"},
+                    "Action": "sts:AssumeRole",
+                }
+            ],
+        }
+    ),
+    tags={"Project": "social-surveyor", "ManagedBy": "pulumi"},
+)
+
+aws.iam.RolePolicyAttachment(
+    "dlm-service-managed",
+    role=dlm_service_role.name,
+    policy_arn="arn:aws:iam::aws:policy/service-role/AWSDataLifecycleManagerServiceRole",
+)
+
+# Schedule: Sunday 02:00 UTC. Weekly cadence balances snapshot cost
+# against recovery-point-objective; for a SQLite file that ingests a
+# few hundred items/day and a few thousand classifications, a week of
+# data loss in the worst case is acceptable. Four retained snapshots
+# means ~one month of point-in-time recovery.
+snapshot_lifecycle_policy = aws.dlm.LifecyclePolicy(
+    "opendata-weekly-snapshot",
+    description=f"Weekly snapshots for social-surveyor {project_name}",
+    execution_role_arn=dlm_service_role.arn,
+    state="ENABLED",
+    policy_details={
+        "resource_types": ["VOLUME"],
+        "target_tags": {"Snapshot": project_name},
+        "schedules": [
+            {
+                "name": "WeeklySnapshots",
+                "create_rule": {
+                    "interval": 1,
+                    "interval_unit": "WEEKS",
+                    "times": ["02:00"],
+                },
+                "retain_rule": {
+                    "count": 4,
+                },
+                "copy_tags": True,
+                "tags_to_add": {
+                    "SnapshotOf": project_name,
+                    "ManagedBy": "pulumi",
+                },
+            }
+        ],
+    },
+    tags={"Project": "social-surveyor", "ManagedBy": "pulumi"},
+)
+
 # --- Outputs ---
 
 pulumi.export("instance_id", instance.id)
@@ -220,6 +287,8 @@ pulumi.export("role_name", role.name)
 pulumi.export("role_arn", role.arn)
 pulumi.export("security_group_id", security_group.id)
 pulumi.export("ami_id", ami.id)
+pulumi.export("dlm_policy_id", snapshot_lifecycle_policy.id)
+pulumi.export("dlm_service_role_arn", dlm_service_role.arn)
 pulumi.export(
     "ssm_connect_command",
     pulumi.Output.concat(

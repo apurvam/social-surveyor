@@ -28,5 +28,18 @@ digest:
   window_hours: 24
 
 cost_caps:
-  daily_haiku_tokens: 500000
+  # Enforced at the start of every classify invocation by cost_caps.py:
+  # sum of today's input+output Haiku tokens (UTC) vs this ceiling.
+  # Value derived from the first post-deploy 24h: ~1.1M tokens observed
+  # (dominated by the initial backfill of ~440 items), doubled. Steady
+  # state should run well under 100k/day; revisit downward once we've
+  # observed a week of non-backfill operation.
+  daily_haiku_tokens: 2200000
   daily_x_reads: 2000
+
+infra:
+  # Infra-channel webhook for cost-cap halts and future session-5c
+  # staleness alerts. Optional: if the env/SSM name below is unset at
+  # runtime, infra alerts fall back to the immediate webhook with a
+  # [INFRA] prefix so the operator still gets paged.
+  webhook_secret: OPENDATA_SLACK_WEBHOOK_INFRA

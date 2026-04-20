@@ -63,6 +63,29 @@ backoff_seconds: 0.0
 """,
         encoding="utf-8",
     )
+    # Minimal routing.yaml so run_classify can load the cost-cap and
+    # infra config. Callers (e.g. test_cli_digest, test_cli_ingest)
+    # overwrite this file when they need different webhook names.
+    (demo / "routing.yaml").write_text(
+        """
+version: 1
+immediate:
+  threshold_urgency: 7
+  alert_worthy_categories: [cost_complaint]
+  webhook_secret: TEST_DEMO_IMMEDIATE_WEBHOOK
+digest:
+  schedule: {hour: 9, minute: 0, timezone: UTC}
+  webhook_secret: TEST_DEMO_DIGEST_WEBHOOK
+  window_hours: 24
+cost_caps:
+  # 0 = unlimited, so the cap check is a no-op for classify tests that
+  # don't exercise the cap path. Tests that DO exercise it seed api_usage
+  # rows and set a small positive cap explicitly.
+  daily_haiku_tokens: 0
+  daily_x_reads: 2000
+""",
+        encoding="utf-8",
+    )
     return root
 
 
@@ -230,6 +253,107 @@ def test_classify_limit_caps_items(tmp_path: Path) -> None:
     )
     assert result["classified"] == 2
     assert len(client.messages.calls) == 2
+
+
+def _write_routing_with_cap(projects_root: Path, cap: int) -> None:
+    """Overwrite demo/routing.yaml with a specific Haiku cap for cap tests.
+
+    No ``infra.webhook_secret`` — the cap check resolves the infra
+    channel via ``resolve_secret`` which raises in the test env; the
+    resolver returns None and the enforce path logs+skips the post.
+    Keeps the test pure (no Slack mocking needed).
+    """
+    (projects_root / "demo" / "routing.yaml").write_text(
+        f"""
+version: 1
+immediate:
+  threshold_urgency: 7
+  alert_worthy_categories: [cost_complaint]
+  webhook_secret: TEST_DEMO_IMMEDIATE_WEBHOOK
+digest:
+  schedule: {{hour: 9, minute: 0, timezone: UTC}}
+  webhook_secret: TEST_DEMO_DIGEST_WEBHOOK
+  window_hours: 24
+cost_caps:
+  daily_haiku_tokens: {cap}
+  daily_x_reads: 2000
+""",
+        encoding="utf-8",
+    )
+
+
+def test_classify_halts_when_haiku_cap_exceeded(tmp_path: Path) -> None:
+    """Over-cap today's tokens → run_classify returns halted=1, makes no
+    API calls, and leaves unclassified items unclassified."""
+    projects_root = _write_project_configs(tmp_path)
+    _write_routing_with_cap(projects_root, cap=1000)
+
+    db_path = tmp_path / "data" / "demo.db"
+    with Storage(db_path) as db:
+        _seed_items(db, 3)
+        # Seed an api_usage row that already blows past the cap.
+        db.record_api_usage(
+            source="anthropic",
+            query_name="v1",
+            items_fetched=1,
+            input_tokens=1500,
+            output_tokens=200,
+        )
+
+    echoed: list[str] = []
+    client = FakeClient([])  # zero responses — a real call would raise
+    result = run_classify(
+        "demo",
+        db_path,
+        projects_root,
+        item_id=None,
+        limit=None,
+        prompt_version_override=None,
+        dry_run=False,
+        client=client,
+        echo_fn=echoed.append,
+    )
+
+    assert result == {"classified": 0, "failed": 0, "halted": 1}
+    assert len(client.messages.calls) == 0
+    assert any("HALT" in line for line in echoed)
+
+    # Items remain unclassified.
+    with Storage(db_path) as db:
+        assert db.get_classification("hackernews:hn0", "v1") is None
+
+
+def test_classify_dry_run_skips_cap_check(tmp_path: Path) -> None:
+    """Dry-run makes no Anthropic calls, so the cap gate doesn't apply
+    — operators inspecting prompts shouldn't be blocked by today's
+    spend."""
+    projects_root = _write_project_configs(tmp_path)
+    _write_routing_with_cap(projects_root, cap=1000)
+
+    db_path = tmp_path / "data" / "demo.db"
+    with Storage(db_path) as db:
+        _seed_items(db, 2)
+        db.record_api_usage(
+            source="anthropic",
+            query_name="v1",
+            items_fetched=1,
+            input_tokens=5000,
+            output_tokens=500,
+        )
+
+    echoed: list[str] = []
+    result = run_classify(
+        "demo",
+        db_path,
+        projects_root,
+        item_id=None,
+        limit=None,
+        prompt_version_override=None,
+        dry_run=True,
+        client=FakeClient([]),
+        echo_fn=echoed.append,
+    )
+    assert result == {"classified": 0, "failed": 0, "dry_run": 2}
 
 
 def test_classify_unknown_item_raises_bad_parameter(tmp_path: Path) -> None:
