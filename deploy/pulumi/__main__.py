@@ -252,28 +252,31 @@ snapshot_lifecycle_policy = aws.dlm.LifecyclePolicy(
     description=f"Weekly snapshots for social-surveyor {project_name}",
     execution_role_arn=dlm_service_role.arn,
     state="ENABLED",
-    policy_details={
-        "resource_types": ["VOLUME"],
-        "target_tags": {"Snapshot": project_name},
-        "schedules": [
-            {
-                "name": "WeeklySnapshots",
-                "create_rule": {
-                    "interval": 1,
-                    "interval_unit": "WEEKS",
-                    "times": ["02:00"],
-                },
-                "retain_rule": {
-                    "count": 4,
-                },
-                "copy_tags": True,
-                "tags_to_add": {
+    policy_details=aws.dlm.LifecyclePolicyPolicyDetailsArgs(
+        resource_types=["VOLUME"],
+        target_tags={"Snapshot": project_name},
+        schedules=[
+            aws.dlm.LifecyclePolicyPolicyDetailsScheduleArgs(
+                name="WeeklySnapshots",
+                create_rule=aws.dlm.LifecyclePolicyPolicyDetailsScheduleCreateRuleArgs(
+                    # DLM's interval-based schedule only supports HOURS,
+                    # which would force us to pick 168h or similar and
+                    # anchor the first run to the policy creation time.
+                    # A cron expression gives us a stable "Sunday 02:00
+                    # UTC" that survives Pulumi updates without drift.
+                    cron_expression="cron(0 2 ? * SUN *)",
+                ),
+                retain_rule=aws.dlm.LifecyclePolicyPolicyDetailsScheduleRetainRuleArgs(
+                    count=4,
+                ),
+                copy_tags=True,
+                tags_to_add={
                     "SnapshotOf": project_name,
                     "ManagedBy": "pulumi",
                 },
-            }
+            ),
         ],
-    },
+    ),
     tags={"Project": "social-surveyor", "ManagedBy": "pulumi"},
 )
 
