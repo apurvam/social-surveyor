@@ -180,6 +180,59 @@ sudo -u social-surveyor bash -c \
 
 ---
 
+## Backup and recovery
+
+The Pulumi stack creates a Data Lifecycle Manager (DLM) policy that
+snapshots any volume tagged `Snapshot=<project_name>` (the instance's
+root volume is tagged at create-time). Defaults:
+
+- **Cadence:** Sunday 02:00 UTC
+- **Retention:** 4 snapshots (~one month of point-in-time recovery)
+- **Cost:** DLM itself is free; snapshot storage on a 10 GB root is
+  around **$0.05/GB/month × 4 snapshots × 10 GB ≈ $2/year**
+
+Verify the policy is active after `pulumi up`:
+
+```bash
+AWS_PROFILE=prod aws dlm get-lifecycle-policies --region us-west-2
+AWS_PROFILE=prod pulumi stack output dlm_policy_id
+```
+
+First snapshot appears the next Sunday 02:00 UTC. To see snapshots once
+they start accumulating:
+
+```bash
+AWS_PROFILE=prod aws ec2 describe-snapshots --region us-west-2 \
+    --owner-ids self \
+    --filters "Name=tag:SnapshotOf,Values=opendata" \
+    --query 'Snapshots[].[SnapshotId,StartTime,VolumeSize,State]' \
+    --output table
+```
+
+### Restoring from a snapshot
+
+Restore is a manual operation. Automation is deferred: picking the
+right snapshot and verifying data integrity needs a human in the loop,
+and the frequency (hopefully zero times per year) doesn't justify the
+script.
+
+Outline:
+
+1. Pick a snapshot: `aws ec2 describe-snapshots --filters ...` (see above)
+2. Stop the service: on the instance, `sudo systemctl stop social-surveyor@opendata`
+3. Create a new volume from the snapshot (same AZ as the instance):
+   `aws ec2 create-volume --snapshot-id snap-... --volume-type gp3
+    --availability-zone us-west-2a`
+4. Stop the instance, detach the current root volume, attach the new
+   one as root, start the instance. (Or — for a non-root data restore,
+   mount at a fresh mount point and copy the SQLite file over.)
+5. Start the service: `sudo systemctl start social-surveyor@opendata`
+
+Expect ~10 minutes hands-on time, plus however long AWS takes to
+materialize the new volume.
+
+---
+
 ## Rollback
 
 ```bash
