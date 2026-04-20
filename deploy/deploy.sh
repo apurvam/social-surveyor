@@ -155,7 +155,11 @@ fi
 # We pass the resolved SHA rather than the user-facing ref so the
 # remote checkout is byte-identical to what the laptop sees — no
 # ambiguity between a local branch tip and the remote branch tip.
-REMOTE_SCRIPT=$(cat <<REMOTE
+#
+# SSM's AWS-RunShellScript executes each line via /bin/sh (dash on
+# Ubuntu), which doesn't support `set -o pipefail`. We wrap the whole
+# body in `bash -c` so pipefail and other bash-isms work predictably.
+REMOTE_BODY=$(cat <<REMOTE
 set -euo pipefail
 cd /opt/social-surveyor
 echo '==> git fetch --all --tags (from ${REF_TYPE} ${REF})'
@@ -174,6 +178,11 @@ sudo journalctl -u social-surveyor@${PROJECT} --since '10 seconds ago' --no-page
 REMOTE
 )
 
+# Base64-encode so arbitrary shell metacharacters in REMOTE_BODY
+# don't need escaping when we substitute into the outer `bash -c`.
+REMOTE_BODY_B64=$(printf '%s' "$REMOTE_BODY" | base64 | tr -d '\n')
+REMOTE_SCRIPT="echo ${REMOTE_BODY_B64} | base64 -d | bash"
+
 echo "deploy target:"
 echo "  ref:      $REF ($REF_TYPE)"
 echo "  sha:      $RESOLVED_SHA"
@@ -184,7 +193,9 @@ echo ""
 
 if [ "$DRY_RUN" -eq 1 ]; then
     echo "--- dry run: would execute on ${INSTANCE_ID} ---"
-    echo "$REMOTE_SCRIPT"
+    # Show the human-readable body, not the base64-wrapped invocation
+    # that actually gets sent to SSM.
+    echo "$REMOTE_BODY"
     echo "--- end dry run ---"
     exit 0
 fi
