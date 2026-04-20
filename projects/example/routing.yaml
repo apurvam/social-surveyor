@@ -8,10 +8,11 @@
 # - cost_caps: hard daily ceilings. Session 4 parses them; full
 #   enforcement is a follow-on (X already has its own daily_read_cap).
 
-version: 1
+version: 2
 
 immediate:
   threshold_urgency: 7
+  max_item_age_hours: 72
   alert_worthy_categories:
     - cost_complaint
     - self_host_intent

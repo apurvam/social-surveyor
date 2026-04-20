@@ -227,6 +227,15 @@ class ImmediateConfig(BaseModel):
         min_length=1,
         description="Env var name holding the immediate-channel incoming webhook URL.",
     )
+    max_item_age_hours: int = Field(
+        default=72,
+        ge=1,
+        description=(
+            "Skip immediate alerts for items whose created_at is older than this. "
+            "Items still route to the digest. Set to a very large value "
+            "(e.g. 87600 for ~10 years) to disable the cutoff."
+        ),
+    )
 
 
 class DigestScheduleConfig(BaseModel):

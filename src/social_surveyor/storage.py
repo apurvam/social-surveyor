@@ -582,9 +582,11 @@ class Storage:
     ) -> list[dict[str, Any]]:
         """Classifications with no alerts row (under the given version).
 
-        Returned rows include the classification fields plus ``item_id``
-        so routers don't need a second query. Ordered oldest-first so
-        retries and multi-run sessions make deterministic progress.
+        Returned rows include the classification fields plus the
+        underlying item's ``created_at`` (aliased as ``item_created_at``)
+        so routers can apply age-based rules without a second query.
+        Ordered oldest-first so retries and multi-run sessions make
+        deterministic progress.
         """
         where = ["NOT EXISTS (SELECT 1 FROM alerts a WHERE a.classification_id = c.id)"]
         params: list[Any] = []
@@ -594,8 +596,10 @@ class Storage:
         clause = " AND ".join(where)
         rows = self._conn.execute(
             f"""
-            SELECT c.*
+            SELECT c.*, i.created_at AS item_created_at
             FROM classifications c
+            LEFT JOIN items i
+                ON (i.source || ':' || i.platform_id) = c.item_id
             WHERE {clause}
             ORDER BY c.classified_at ASC, c.id ASC
             """,
