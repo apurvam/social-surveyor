@@ -307,3 +307,162 @@ def test_silenced_since_filters_by_window(tmp_path: Path) -> None:
 
         cutoff = datetime.now(UTC) - timedelta(days=1)
         assert db.silenced_since(cutoff) == {"x:2"}
+
+
+# --- alerts windowing ---------------------------------------------------
+#
+# list_alerts_in_window is the foundation the digest runs on top of:
+# - include_unsent=True must return only pending alerts (no re-posting
+#   what was delivered in a prior cycle)
+# - include_unsent=False must return only delivered alerts within the
+#   window (no pending rows leaking into "what shipped" audits)
+#
+# These are disjoint sets by design — see the docstring on the method.
+
+
+def _seed_alert_row(
+    db: Storage,
+    *,
+    item_id: str = "hackernews:1",
+    channel: str = "digest",
+    category: str = "cost_complaint",
+    urgency: int = 8,
+    sent_at: datetime | None = None,
+) -> int:
+    """Seed the item, classification, and alert needed for a window query."""
+    source, platform_id = item_id.split(":", 1)
+    db.upsert_item(
+        RawItem(
+            source=source,
+            platform_id=platform_id,
+            url=f"https://ex/{platform_id}",
+            title=f"t-{platform_id}",
+            body="body",
+            author="alice",
+            created_at=datetime.now(UTC) - timedelta(minutes=30),
+            raw_json={"id": platform_id},
+        )
+    )
+    db.save_classification(
+        item_id=item_id,
+        category=category,
+        urgency=urgency,
+        reasoning="r",
+        prompt_version="v1",
+        model="haiku",
+        input_tokens=1,
+        output_tokens=1,
+        classified_at=datetime.now(UTC),
+        raw_response={},
+    )
+    classification_id = db.get_classification(item_id, "v1")["id"]  # type: ignore[index]
+    return db.record_alert(
+        item_id=item_id,
+        classification_id=classification_id,
+        channel=channel,
+        sent_at=sent_at,
+    )
+
+
+def test_list_alerts_in_window_pending_only_returns_unsent(tmp_path: Path) -> None:
+    """include_unsent=True returns only alerts where sent_at IS NULL and
+    queued_at is within the window. Already-sent alerts whose sent_at
+    falls in the window (e.g., delivered in a prior digest cycle that
+    still overlaps today's rolling window) must NOT be re-surfaced —
+    that was the duplication bug that had items shipping in two
+    consecutive daily digests.
+    """
+    db_path = tmp_path / "t.db"
+    with Storage(db_path) as db:
+        pending_id = _seed_alert_row(db, item_id="hackernews:pending", sent_at=None)
+        _seed_alert_row(
+            db,
+            item_id="hackernews:sent",
+            sent_at=datetime.now(UTC) - timedelta(hours=1),
+        )
+
+        window_start = datetime.now(UTC) - timedelta(hours=24)
+        pending = db.list_alerts_in_window(
+            channel="digest",
+            since=window_start,
+            include_unsent=True,
+        )
+        assert [r["alert_id"] for r in pending] == [pending_id]
+        assert pending[0]["item_id"] == "hackernews:pending"
+
+
+def test_list_alerts_in_window_sent_only_returns_already_delivered(tmp_path: Path) -> None:
+    """include_unsent=False is the companion mode: strictly the alerts
+    that landed in Slack within the window (audit, inspection)."""
+    db_path = tmp_path / "t.db"
+    with Storage(db_path) as db:
+        _seed_alert_row(db, item_id="hackernews:pending", sent_at=None)
+        sent_id = _seed_alert_row(
+            db,
+            item_id="hackernews:sent",
+            sent_at=datetime.now(UTC) - timedelta(hours=1),
+        )
+
+        window_start = datetime.now(UTC) - timedelta(hours=24)
+        delivered = db.list_alerts_in_window(
+            channel="digest",
+            since=window_start,
+            include_unsent=False,
+        )
+        assert [r["alert_id"] for r in delivered] == [sent_id]
+
+
+def test_list_alerts_in_window_consecutive_digest_cycles_do_not_duplicate(
+    tmp_path: Path,
+) -> None:
+    """The regression this file most wants to guard against: yesterday's
+    digest posted item A; today's digest runs 24h later with the same
+    24h window; A's sent_at is exactly 24h old, at the window boundary.
+    The pending query must skip A (already delivered) and return only
+    items queued since A shipped.
+    """
+    db_path = tmp_path / "t.db"
+    with Storage(db_path) as db:
+        # A shipped in the previous digest cycle.
+        _seed_alert_row(
+            db,
+            item_id="hackernews:A",
+            sent_at=datetime.now(UTC) - timedelta(hours=23, minutes=59),
+        )
+        # B was queued an hour ago, still pending.
+        b_id = _seed_alert_row(db, item_id="hackernews:B", sent_at=None)
+
+        window_start = datetime.now(UTC) - timedelta(hours=24)
+        pending = db.list_alerts_in_window(
+            channel="digest",
+            since=window_start,
+            include_unsent=True,
+        )
+        assert [r["alert_id"] for r in pending] == [b_id]
+
+
+def test_list_alerts_in_window_respects_queued_at_for_unsent(tmp_path: Path) -> None:
+    """An unsent alert queued before the window begins must not leak
+    into a pending query — even though sent_at is NULL, queued_at gates
+    visibility. Prevents a since=<future> filter from returning the
+    full unsent backlog."""
+    import sqlite3
+
+    db_path = tmp_path / "t.db"
+    with Storage(db_path) as db:
+        alert_id = _seed_alert_row(db, item_id="hackernews:old", sent_at=None)
+        # Backdate queued_at to before the window.
+        with sqlite3.connect(db_path) as raw:
+            raw.execute(
+                "UPDATE alerts SET queued_at = ? WHERE id = ?",
+                ((datetime.now(UTC) - timedelta(days=7)).isoformat(), alert_id),
+            )
+            raw.commit()
+
+        window_start = datetime.now(UTC) - timedelta(hours=24)
+        pending = db.list_alerts_in_window(
+            channel="digest",
+            since=window_start,
+            include_unsent=True,
+        )
+        assert pending == []

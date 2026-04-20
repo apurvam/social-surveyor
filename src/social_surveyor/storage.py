@@ -703,22 +703,23 @@ class Storage:
         since: datetime,
         include_unsent: bool = False,
     ) -> list[dict[str, Any]]:
-        """Alerts on ``channel`` whose sent_at (or queued_at if unsent)
-        falls in ``[since, now]``.
+        """Alerts on ``channel`` within the window, partitioned by sent state.
 
-        Used by the digest builder to assemble:
-          - ``channel='immediate'``, ``include_unsent=False``: already-
-            alerted items for the "alerted earlier" section.
-          - ``channel='digest'``, ``include_unsent=True``: items queued
-            for this digest cycle.
+        - ``include_unsent=False``: only alerts with ``sent_at >= since``
+          (i.e., already delivered during the window).
+        - ``include_unsent=True``: only alerts with ``sent_at IS NULL`` and
+          ``queued_at >= since`` (i.e., pending for the next delivery).
+
+        The two modes are disjoint on purpose: a digest should render
+        **only** what hasn't been delivered yet, and a "what landed in
+        Slack during this window" query should render **only** what did.
+        Callers that want both (e.g., operator inspection over a range)
+        invoke twice and concatenate.
         """
         since_iso = _to_iso(since)
         if include_unsent:
-            # Unsent alerts are only relevant if queued in-window; otherwise
-            # a --since <future-date> filter would still return every
-            # unsent alert regardless of when it was queued.
-            where = "a.channel = ? AND ((a.sent_at IS NULL AND a.queued_at >= ?) OR a.sent_at >= ?)"
-            params: tuple[Any, ...] = (channel, since_iso, since_iso)
+            where = "a.channel = ? AND a.sent_at IS NULL AND a.queued_at >= ?"
+            params: tuple[Any, ...] = (channel, since_iso)
         else:
             where = "a.channel = ? AND a.sent_at IS NOT NULL AND a.sent_at >= ?"
             params = (channel, since_iso)
