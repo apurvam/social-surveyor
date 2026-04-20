@@ -50,21 +50,34 @@ def decide(
     urgency: int,
     silenced: bool,
     cfg: RoutingConfig,
+    item_created_at: datetime | None = None,
+    now: datetime | None = None,
 ) -> str:
     """Pure routing decision. Returns ``'immediate'`` or ``'digest'``.
 
     Silenced items always go to the digest channel — they never fire
     an immediate alert, but the digest-side filter decides whether to
     show them with a 🔕 marker or hide them entirely.
+
+    Age cutoff: an item whose ``created_at`` is older than
+    ``cfg.immediate.max_item_age_hours`` is demoted to digest even if
+    it would otherwise alert. A ``None`` ``item_created_at`` allows the
+    alert — when timestamps are missing we'd rather be noisy than
+    silently hide the issue.
     """
     if silenced:
         return "digest"
-    if (
+    if not (
         category in cfg.immediate.alert_worthy_categories
         and urgency >= cfg.immediate.threshold_urgency
     ):
-        return "immediate"
-    return "digest"
+        return "digest"
+    if item_created_at is not None:
+        effective_now = now or datetime.now(UTC)
+        age_hours = (effective_now - item_created_at).total_seconds() / 3600
+        if age_hours > cfg.immediate.max_item_age_hours:
+            return "digest"
+    return "immediate"
 
 
 def route_classifications(
@@ -72,6 +85,7 @@ def route_classifications(
     cfg: RoutingConfig,
     *,
     dry_run: bool = False,
+    now: datetime | None = None,
 ) -> list[RoutingDecision]:
     """Route every classification that doesn't yet have an alerts row.
 
@@ -79,23 +93,32 @@ def route_classifications(
     returned for inspection. Otherwise each decision writes a
     corresponding alerts row with ``sent_at=NULL``; the immediate-channel
     rows are picked up by :func:`send_pending_immediate_alerts`.
+
+    ``now`` is accepted for test injection. In production it defaults
+    to ``datetime.now(UTC)``.
     """
     pending = db.list_unrouted_classifications()
+    effective_now = now or datetime.now(UTC)
     decisions: list[RoutingDecision] = []
     for row in pending:
         item_id = row["item_id"]
         silenced = db.is_silenced(item_id)
+        item_created_at = _coerce_item_created_at(row.get("item_created_at"))
+        category = row["category"]
+        urgency = int(row["urgency"])
         channel = decide(
-            category=row["category"],
-            urgency=int(row["urgency"]),
+            category=category,
+            urgency=urgency,
             silenced=silenced,
             cfg=cfg,
+            item_created_at=item_created_at,
+            now=effective_now,
         )
         d = RoutingDecision(
             item_id=item_id,
             classification_id=int(row["id"]),
-            category=row["category"],
-            urgency=int(row["urgency"]),
+            category=category,
+            urgency=urgency,
             channel=channel,
             silenced=silenced,
         )
@@ -106,16 +129,44 @@ def route_classifications(
                 classification_id=int(row["id"]),
                 channel=channel,
             )
+        # Surface the age-skip path explicitly so an operator watching
+        # journald can confirm the cutoff is working.
+        if (
+            channel == "digest"
+            and not silenced
+            and item_created_at is not None
+            and category in cfg.immediate.alert_worthy_categories
+            and urgency >= cfg.immediate.threshold_urgency
+        ):
+            age_hours = (effective_now - item_created_at).total_seconds() / 3600
+            if age_hours > cfg.immediate.max_item_age_hours:
+                log.info(
+                    "skipping_immediate_alert_old_item",
+                    item_id=item_id,
+                    age_hours=round(age_hours, 1),
+                    cutoff_hours=cfg.immediate.max_item_age_hours,
+                )
         log.info(
             "router.decided",
             item_id=item_id,
-            category=row["category"],
-            urgency=int(row["urgency"]),
+            category=category,
+            urgency=urgency,
             silenced=silenced,
             channel=channel,
             dry_run=dry_run,
         )
     return decisions
+
+
+def _coerce_item_created_at(raw: Any) -> datetime | None:
+    """Storage rows return ``item_created_at`` as an ISO string (or
+    already-parsed datetime in tests). Normalize to a TZ-aware datetime
+    or ``None``."""
+    if raw is None or raw == "":
+        return None
+    if isinstance(raw, datetime):
+        return raw if raw.tzinfo is not None else raw.replace(tzinfo=UTC)
+    return datetime.fromisoformat(raw)
 
 
 def send_pending_immediate_alerts(

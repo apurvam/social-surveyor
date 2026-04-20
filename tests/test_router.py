@@ -1,10 +1,11 @@
 from __future__ import annotations
 
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
 import httpx
+import pytest
 
 from social_surveyor.config import (
     DigestConfig,
@@ -27,12 +28,14 @@ def _cfg(
     *,
     threshold: int = 7,
     alert_worthy: tuple[str, ...] = ("cost_complaint", "self_host_intent", "competitor_pain"),
+    max_item_age_hours: int = 72,
 ) -> RoutingConfig:
     return RoutingConfig(
         immediate=ImmediateConfig(
             threshold_urgency=threshold,
             alert_worthy_categories=list(alert_worthy),
             webhook_secret="TEST_IMMEDIATE_WEBHOOK",
+            max_item_age_hours=max_item_age_hours,
         ),
         digest=DigestConfig(
             schedule=DigestScheduleConfig(hour=9, minute=0, timezone="UTC"),
@@ -48,6 +51,7 @@ def _seed_classified_item(
     item_id: str = "hackernews:100",
     category: str = "cost_complaint",
     urgency: int = 8,
+    created_at: datetime | None = None,
 ) -> int:
     source, platform_id = item_id.split(":", 1)
     db.upsert_item(
@@ -58,7 +62,7 @@ def _seed_classified_item(
             title="t",
             body="b",
             author="alice",
-            created_at=datetime(2026, 4, 19, 12, 0, tzinfo=UTC),
+            created_at=created_at or datetime.now(UTC),
             raw_json={"id": platform_id},
         )
     )
@@ -111,6 +115,106 @@ def test_decide_silenced_always_digest() -> None:
     assert decide(category="cost_complaint", urgency=10, silenced=True, cfg=cfg) == "digest"
 
 
+# --- decide() age cutoff -----------------------------------------------------
+
+
+def test_decide_recent_item_alerts_immediately() -> None:
+    cfg = _cfg(threshold=7, max_item_age_hours=72)
+    now = datetime(2026, 4, 20, 12, 0, tzinfo=UTC)
+    recent = now - timedelta(hours=2)
+    assert (
+        decide(
+            category="cost_complaint",
+            urgency=8,
+            silenced=False,
+            cfg=cfg,
+            item_created_at=recent,
+            now=now,
+        )
+        == "immediate"
+    )
+
+
+def test_decide_old_item_demoted_to_digest() -> None:
+    cfg = _cfg(threshold=7, max_item_age_hours=72)
+    now = datetime(2026, 4, 20, 12, 0, tzinfo=UTC)
+    # Two years old — clearly past the 72h cutoff.
+    old = now - timedelta(days=2 * 365)
+    assert (
+        decide(
+            category="cost_complaint",
+            urgency=8,
+            silenced=False,
+            cfg=cfg,
+            item_created_at=old,
+            now=now,
+        )
+        == "digest"
+    )
+
+
+def test_decide_null_created_at_allows_alert() -> None:
+    """Per operator: prefer noise over silent digest-only for missing timestamps."""
+    cfg = _cfg(threshold=7, max_item_age_hours=72)
+    assert (
+        decide(
+            category="cost_complaint",
+            urgency=8,
+            silenced=False,
+            cfg=cfg,
+            item_created_at=None,
+        )
+        == "immediate"
+    )
+
+
+def test_decide_cutoff_is_configurable() -> None:
+    cfg = _cfg(threshold=7, max_item_age_hours=1)
+    now = datetime(2026, 4, 20, 12, 0, tzinfo=UTC)
+    two_hours_old = now - timedelta(hours=2)
+    assert (
+        decide(
+            category="cost_complaint",
+            urgency=8,
+            silenced=False,
+            cfg=cfg,
+            item_created_at=two_hours_old,
+            now=now,
+        )
+        == "digest"
+    )
+
+
+def test_decide_cutoff_boundary_inclusive_at_cutoff_exclusive_over() -> None:
+    """Age exactly at cutoff allows; age > cutoff skips."""
+    cfg = _cfg(threshold=7, max_item_age_hours=24)
+    now = datetime(2026, 4, 20, 12, 0, tzinfo=UTC)
+    at_cutoff = now - timedelta(hours=24)
+    just_over = now - timedelta(hours=24, seconds=1)
+    assert (
+        decide(
+            category="cost_complaint",
+            urgency=8,
+            silenced=False,
+            cfg=cfg,
+            item_created_at=at_cutoff,
+            now=now,
+        )
+        == "immediate"
+    )
+    assert (
+        decide(
+            category="cost_complaint",
+            urgency=8,
+            silenced=False,
+            cfg=cfg,
+            item_created_at=just_over,
+            now=now,
+        )
+        == "digest"
+    )
+
+
 # --- route_classifications() end-to-end -------------------------------------
 
 
@@ -142,6 +246,55 @@ def test_route_is_idempotent(tmp_path: Path) -> None:
         second = route_classifications(db, _cfg())
     assert len(first) == 1
     assert second == []
+
+
+def test_route_old_item_routes_to_digest_and_logs_skip(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Old alert-worthy item: immediate skipped, digest row still written, skip logged."""
+    now = datetime(2026, 4, 20, 12, 0, tzinfo=UTC)
+    old = now - timedelta(days=365)
+    with Storage(tmp_path / "t.db") as db:
+        _seed_classified_item(
+            db,
+            item_id="hackernews:old1",
+            category="cost_complaint",
+            urgency=9,
+            created_at=old,
+        )
+        decisions = route_classifications(db, _cfg(max_item_age_hours=72), now=now)
+        # Digest entry still exists so the item is comprehensible in the
+        # daily roundup — only the immediate-alert path is suppressed.
+        alert_rows = db._conn.execute(
+            "SELECT channel FROM alerts WHERE item_id = ?",
+            ("hackernews:old1",),
+        ).fetchall()
+
+    assert len(decisions) == 1
+    assert decisions[0].channel == "digest"
+    assert [r["channel"] for r in alert_rows] == ["digest"]
+    captured = capsys.readouterr().out
+    assert "skipping_immediate_alert_old_item" in captured
+    assert "hackernews:old1" in captured
+    # Structlog may render key=value or JSON depending on whether prior
+    # tests configured logging — both contain the literal "72".
+    assert "72" in captured
+
+
+def test_route_honors_configurable_cutoff(tmp_path: Path) -> None:
+    now = datetime(2026, 4, 20, 12, 0, tzinfo=UTC)
+    two_hours_old = now - timedelta(hours=2)
+    with Storage(tmp_path / "t.db") as db:
+        _seed_classified_item(
+            db,
+            item_id="hackernews:cfg1",
+            category="cost_complaint",
+            urgency=9,
+            created_at=two_hours_old,
+        )
+        decisions = route_classifications(db, _cfg(max_item_age_hours=1), now=now)
+    assert decisions[0].channel == "digest"
 
 
 def test_route_dry_run_does_not_write_alerts_rows(tmp_path: Path) -> None:

@@ -8,10 +8,11 @@
 # Threshold 7 matches the stop criteria used in eval — the classifier's
 # u>=7 band is "good engagement opportunity" or above.
 
-version: 1
+version: 2
 
 immediate:
   threshold_urgency: 7
+  max_item_age_hours: 72
   alert_worthy_categories:
     - cost_complaint
     - self_host_intent
