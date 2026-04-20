@@ -85,6 +85,21 @@ DIGEST_CATEGORY_ORDER: tuple[str, ...] = (
 # single hint line pointing at the CLI inspection command.
 TOP_N_PER_CATEGORY = 5
 
+# Slack Block Kit enforces a hard ceiling of 50 blocks per message; a
+# POST with 51+ blocks is rejected with 400 invalid_blocks. We target a
+# lower budget to leave headroom for future block additions and for
+# renderer quirks (some clients reject pre-limit payloads on their own
+# internal heuristics). If the naive build exceeds this, trailing
+# category sections are dropped with a single "N categories not shown"
+# context block.
+SLACK_MAX_BLOCKS = 48
+
+# Cap the alerted-earlier section to keep bursty days (backlog flushes,
+# launches that generate many quick alerts) from swamping the digest.
+# Overflow gets a context pointer to the immediate-alert channel where
+# the full list already lives.
+ALERTED_EARLIER_CAP = 5
+
 # Truncation bounds. 120 chars is what fits in a Slack section at a
 # normal window width; 200 on bodies is enough to skim without eating
 # the whole screen. X gets a wider title cap because X posts top out at
@@ -310,39 +325,17 @@ def build_digest(
 
     # --- alerted-earlier section ---
     if alerted:
+        alerted_sorted = sorted(
+            alerted,
+            key=lambda i: (-(i.urgency), -(i.alerted_at or datetime.now(UTC)).timestamp()),
+        )
+        shown_alerted = alerted_sorted[:ALERTED_EARLIER_CAP]
+        alerted_overflow = len(alerted_sorted) - len(shown_alerted)
         blocks.append({"type": "divider"})
         blocks.append(_header_block("🔔 Alerted earlier today"))
-        for item in sorted(
-            alerted, key=lambda i: (-(i.urgency), -(i.alerted_at or datetime.now(UTC)).timestamp())
-        ):
+        for item in shown_alerted:
             blocks.append(_alerted_earlier_block(item, config))
-
-    # --- per-category sections ---
-    for cat in ordered_categories:
-        cat_items = by_category[cat]
-        # Sort by urgency desc, then by created_at desc (recency secondary).
-        cat_items_sorted = sorted(
-            cat_items,
-            key=lambda i: (-(i.urgency), -i.created_at.timestamp()),
-        )
-        top = cat_items_sorted[:TOP_N_PER_CATEGORY]
-        overflow = len(cat_items_sorted) - len(top)
-
-        blocks.append({"type": "divider"})
-        emoji = CATEGORY_EMOJI.get(cat, "•")
-        cat_display = config.category_display(cat)
-        total_in_cat = len(cat_items_sorted)
-        noun = "item" if total_in_cat == 1 else "items"
-        if overflow > 0:
-            header_line = (
-                f"{emoji} {cat_display} · {total_in_cat} {noun} (top {len(top)} by urgency)"
-            )
-        else:
-            header_line = f"{emoji} {cat_display} · {total_in_cat} {noun}"
-        blocks.append(_header_block(header_line))
-        for item in top:
-            blocks.append(_digest_item_block(item, config))
-        if overflow > 0:
+        if alerted_overflow > 0:
             blocks.append(
                 {
                     "type": "context",
@@ -350,17 +343,101 @@ def build_digest(
                         {
                             "type": "mrkdwn",
                             "text": (
-                                f"_{overflow} more {cat} items — run "
-                                f"`{config.sv_command} digest --project "
-                                f"{config.project} --category {cat}` for the full list_"
+                                f"_{alerted_overflow} more alerted earlier today — "
+                                f"see the immediate-alert Slack channel for the full list_"
                             ),
                         }
                     ],
                 }
             )
 
-    blocks.extend(_cost_and_correction_footer(stats, config))
+    # --- per-category sections ---
+    # Build each category's blocks as a self-contained group so the
+    # budget trim at the end can drop whole categories cleanly.
+    footer = _cost_and_correction_footer(stats, config)
+    # Reserve one block for a potential "N categories not shown" context.
+    category_budget = SLACK_MAX_BLOCKS - len(blocks) - len(footer) - 1
+
+    category_groups: list[tuple[str, list[dict[str, Any]]]] = []
+    for cat in ordered_categories:
+        category_groups.append((cat, _build_category_group(cat, by_category[cat], config)))
+
+    dropped_categories: list[str] = []
+    for cat, group in category_groups:
+        if len(group) <= category_budget:
+            blocks.extend(group)
+            category_budget -= len(group)
+        else:
+            dropped_categories.append(cat)
+
+    if dropped_categories:
+        dropped_display = ", ".join(config.category_display(c) for c in dropped_categories)
+        blocks.append(
+            {
+                "type": "context",
+                "elements": [
+                    {
+                        "type": "mrkdwn",
+                        "text": (
+                            f"_{len(dropped_categories)} categories not shown "
+                            f"(digest block budget): {dropped_display}. "
+                            f"Run `{config.sv_command} digest --project {config.project} "
+                            f"--category <cat>` for the full list_"
+                        ),
+                    }
+                ],
+            }
+        )
+
+    blocks.extend(footer)
     return {"blocks": blocks}
+
+
+def _build_category_group(
+    cat: str,
+    cat_items: list[NotifierItem],
+    config: NotifierConfig,
+) -> list[dict[str, Any]]:
+    """Blocks for one category section: divider, header, up to ``TOP_N_PER_CATEGORY``
+    item sections, optional overflow context.
+    """
+    # Sort by urgency desc, then by created_at desc (recency secondary).
+    cat_items_sorted = sorted(
+        cat_items,
+        key=lambda i: (-(i.urgency), -i.created_at.timestamp()),
+    )
+    top = cat_items_sorted[:TOP_N_PER_CATEGORY]
+    overflow = len(cat_items_sorted) - len(top)
+
+    emoji = CATEGORY_EMOJI.get(cat, "•")
+    cat_display = config.category_display(cat)
+    total_in_cat = len(cat_items_sorted)
+    noun = "item" if total_in_cat == 1 else "items"
+    if overflow > 0:
+        header_line = f"{emoji} {cat_display} · {total_in_cat} {noun} (top {len(top)} by urgency)"
+    else:
+        header_line = f"{emoji} {cat_display} · {total_in_cat} {noun}"
+
+    group: list[dict[str, Any]] = [{"type": "divider"}, _header_block(header_line)]
+    for item in top:
+        group.append(_digest_item_block(item, config))
+    if overflow > 0:
+        group.append(
+            {
+                "type": "context",
+                "elements": [
+                    {
+                        "type": "mrkdwn",
+                        "text": (
+                            f"_{overflow} more {cat} items — run "
+                            f"`{config.sv_command} digest --project "
+                            f"{config.project} --category {cat}` for the full list_"
+                        ),
+                    }
+                ],
+            }
+        )
+    return group
 
 
 # --- block helpers -----------------------------------------------------------
@@ -576,9 +653,11 @@ def post_to_slack(
 
 
 __all__ = [
+    "ALERTED_EARLIER_CAP",
     "CATEGORY_COLORS",
     "CATEGORY_EMOJI",
     "DIGEST_CATEGORY_ORDER",
+    "SLACK_MAX_BLOCKS",
     "TOP_N_PER_CATEGORY",
     "DigestStats",
     "NotifierConfig",
