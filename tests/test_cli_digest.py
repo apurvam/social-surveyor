@@ -37,7 +37,6 @@ digest:
   window_hours: 24
 cost_caps:
   daily_haiku_tokens: 500000
-  daily_x_reads: 2000
 """,
         encoding="utf-8",
     )

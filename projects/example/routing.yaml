@@ -35,8 +35,10 @@ digest:
   window_hours: 24
 
 cost_caps:
+  # Haiku daily token ceiling. X's daily read ceiling lives in
+  # sources/x.yaml as `daily_read_cap`, not here — see
+  # CostCapsConfig in config.py.
   daily_haiku_tokens: 500000
-  daily_x_reads: 2000
 
 infra:
   # Leave commented out to skip the dedicated infra channel; the

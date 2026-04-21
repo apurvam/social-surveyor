@@ -50,7 +50,7 @@ def _routing(
             schedule=DigestScheduleConfig(hour=9, minute=0, timezone="UTC"),
             webhook_secret="TEST_DIGEST",
         ),
-        cost_caps=CostCapsConfig(daily_haiku_tokens=cap, daily_x_reads=2000),
+        cost_caps=CostCapsConfig(daily_haiku_tokens=cap),
         infra=InfraConfig(webhook_secret=infra_secret),
     )
 

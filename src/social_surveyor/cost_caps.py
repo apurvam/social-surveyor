@@ -304,11 +304,12 @@ def enforce_x_cap(
     """Run the X cap check and post-once infra alert. Return ``True`` to
     continue polling, ``False`` to halt.
 
-    ``cap`` is the per-project X-reads ceiling (currently sourced from
-    ``cfg.x.daily_read_cap`` in the X source YAML). Passed explicitly
-    rather than read from ``routing_cfg.cost_caps.daily_x_reads`` —
-    that field is legacy documentation and is not the effective cap.
-    ``routing_cfg`` is still needed for infra-channel resolution.
+    ``cap`` is the per-project X-reads ceiling, sourced from
+    ``cfg.x.daily_read_cap`` in ``projects/<n>/sources/x.yaml``.
+    Passed explicitly because the single source of truth lives under
+    the X source config, not under routing — the caller (``run_poll``)
+    threads it in. ``routing_cfg`` is still needed for infra-channel
+    resolution.
     """
     result = check_x_cap(db, cap, now=now)
 

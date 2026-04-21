@@ -34,8 +34,10 @@ cost_caps:
   # (dominated by the initial backfill of ~440 items), doubled. Steady
   # state should run well under 100k/day; revisit downward once we've
   # observed a week of non-backfill operation.
+  #
+  # The X daily cap lives in sources/x.yaml as `daily_read_cap`, not
+  # here — see CostCapsConfig docstring.
   daily_haiku_tokens: 2200000
-  daily_x_reads: 2000
 
 infra:
   # Infra-channel webhook for cost-cap halts and future session-5c

@@ -82,7 +82,6 @@ cost_caps:
   # don't exercise the cap path. Tests that DO exercise it seed api_usage
   # rows and set a small positive cap explicitly.
   daily_haiku_tokens: 0
-  daily_x_reads: 2000
 """,
         encoding="utf-8",
     )
@@ -276,7 +275,6 @@ digest:
   window_hours: 24
 cost_caps:
   daily_haiku_tokens: {cap}
-  daily_x_reads: 2000
 """,
         encoding="utf-8",
     )
