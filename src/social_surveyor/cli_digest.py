@@ -100,7 +100,13 @@ def run_digest(
             )
 
         items = _collect_digest_items(db, window_start=window_start)
-        stats = _compute_digest_stats(db, project, projects_root, window_start=window_start)
+        stats = _compute_digest_stats(
+            db,
+            project,
+            projects_root,
+            window_start=window_start,
+            http_client=http_client,
+        )
 
         payload = build_digest(items, stats, notifier_cfg)
 
@@ -212,6 +218,7 @@ def _compute_digest_stats(
     projects_root: Path,
     *,
     window_start: datetime,
+    http_client: Any = None,
 ) -> DigestStats:
     """Compute cost + accuracy footer data. Degrades gracefully.
 
@@ -219,6 +226,11 @@ def _compute_digest_stats(
     counter multiplied by an assumed rate. A fetch failure (auth blip,
     rate limit, network) leaves ``x_usage=None`` so the footer renders
     a short fallback; the rest of the digest is unaffected.
+
+    ``http_client`` is the single ``httpx.Client`` threaded down from
+    :func:`run_digest` — shared with the Slack poster. Tests pass a
+    ``MockTransport`` client and handle both hosts in one handler so
+    no branch in this codepath reaches live network.
     """
     del window_start  # accepted for signature symmetry with collectors
     today_start = datetime.now(UTC).replace(hour=0, minute=0, second=0, microsecond=0)
@@ -236,13 +248,23 @@ def _compute_digest_stats(
         haiku_cost_usd=haiku_cost,
         total_labeled=total_labeled,
         accuracy_pct=accuracy_pct,
-        x_usage=_resolve_x_usage(project, projects_root),
+        x_usage=_resolve_x_usage(project, projects_root, http_client=http_client),
     )
 
 
-def _resolve_x_usage(project: str, projects_root: Path) -> XUsageSnapshot | None:
+def _resolve_x_usage(
+    project: str,
+    projects_root: Path,
+    *,
+    http_client: Any = None,
+) -> XUsageSnapshot | None:
     """Pull the current X-project usage. ``None`` when X isn't configured
     or the API call fails — the footer handles both cases.
+
+    ``http_client`` (optional) is forwarded to :func:`fetch_x_usage`
+    so tests can mock the call through a shared transport. ``None``
+    lets ``fetch_x_usage`` create a short-lived client per call (prod
+    path: once per digest cycle).
     """
     try:
         cfg = load_project_config(project, projects_root=projects_root)
@@ -255,7 +277,7 @@ def _resolve_x_usage(project: str, projects_root: Path) -> XUsageSnapshot | None
     token = os.environ.get("X_BEARER_TOKEN")
     if not token:
         return None
-    usage = fetch_x_usage(token)
+    usage = fetch_x_usage(token, client=http_client)
     if usage is None:
         return None
     return XUsageSnapshot(

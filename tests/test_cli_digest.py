@@ -408,6 +408,82 @@ def test_digest_category_inspection_shows_both_sent_and_pending(
     assert "(pending)" in text
 
 
+def test_digest_footer_renders_authoritative_x_usage(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """End-to-end mock: when X is configured and X_BEARER_TOKEN is set,
+    the digest footer pulls usage from X's authoritative endpoint —
+    threaded through the injected http_client so tests don't hit the
+    network. Single MockTransport handles both Slack and X hosts.
+    """
+    projects_root = _write_project_configs(tmp_path)
+    _add_routing_yaml(projects_root)
+    # Configure X in the project so _resolve_x_usage doesn't short-circuit.
+    (projects_root / "demo" / "sources" / "x.yaml").write_text(
+        "queries:\n  - name: q1\n    query: 'test'\ndaily_read_cap: 500\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("X_BEARER_TOKEN", "AAAAtest-token")
+    monkeypatch.setenv("TEST_DEMO_DIGEST_WEBHOOK", "https://hooks.example/digest")
+    monkeypatch.setenv("TEST_DEMO_IMMEDIATE_WEBHOOK", "https://hooks.example/immediate")
+
+    db_path = tmp_path / "data" / "demo.db"
+    with Storage(db_path) as db:
+        _seed_item_and_classification(db, item_id="hackernews:1", category="off_topic", urgency=0)
+    run_route(
+        "demo",
+        db_path,
+        projects_root,
+        dry_run=False,
+        http_client=httpx.Client(
+            transport=httpx.MockTransport(lambda _r: httpx.Response(200, text="ok"))
+        ),
+        echo_fn=lambda _m="": None,
+    )
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.host == "api.x.com" and request.url.path == "/2/usage/tweets":
+            return httpx.Response(
+                200,
+                json={
+                    "data": {
+                        "project_usage": 143,
+                        "project_cap": 10_000,
+                        "cap_reset_day": 21,
+                    }
+                },
+            )
+        # Slack or anything else
+        return httpx.Response(200, text="ok")
+
+    client = httpx.Client(transport=httpx.MockTransport(handler))
+    echoed: list[str] = []
+    try:
+        run_digest(
+            "demo",
+            db_path,
+            projects_root,
+            dry_run=True,  # stdout-only, no Slack POST either way
+            echo_fn=echoed.append,
+            http_client=client,
+        )
+    finally:
+        client.close()
+
+    payload_text = "\n".join(echoed).split("\n\n")[0]
+    payload = json.loads(payload_text)
+    # Footer is the last section block — authoritative X usage rendered.
+    footer_text = next(
+        b["text"]["text"]
+        for b in reversed(payload["blocks"])
+        if b.get("type") == "section" and "items labeled" in b.get("text", {}).get("text", "")
+    )
+    assert "143/10,000 posts" in footer_text
+    assert "resets in 21 days" in footer_text
+    # And the local-estimate $ is gone — replaced by authoritative consumption.
+    assert "$0.72" not in footer_text  # no synthesized X dollar figure
+
+
 def test_digest_requires_routing_yaml(tmp_path: Path) -> None:
     projects_root = _write_project_configs(tmp_path)
     # _write_project_configs now emits a default routing.yaml so the
