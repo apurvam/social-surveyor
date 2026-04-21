@@ -295,6 +295,7 @@ def test_digest_cost_footer_includes_accuracy() -> None:
             haiku_cost_usd=0.12,
             total_labeled=143,
             accuracy_pct=61.5,
+            x_configured=True,
             x_usage=XUsageSnapshot(project_usage=143, project_cap=10_000, cap_reset_day=21),
         ),
         _cfg(project="opendata"),
@@ -309,14 +310,16 @@ def test_digest_cost_footer_includes_accuracy() -> None:
 
 
 def test_digest_cost_footer_degrades_when_x_usage_unavailable() -> None:
-    """When /2/usage/tweets can't be reached, the footer shows a short
-    'unavailable' note rather than a made-up number."""
+    """When X is configured but /2/usage/tweets can't be reached, the
+    footer shows a short 'unavailable' note rather than a made-up
+    number."""
     payload = build_digest(
         [_item()],
         DigestStats(
             day=date(2026, 4, 19),
             haiku_cost_usd=0.12,
             total_labeled=143,
+            x_configured=True,
             x_usage=None,
         ),
         _cfg(project="opendata"),
@@ -325,6 +328,37 @@ def test_digest_cost_footer_degrades_when_x_usage_unavailable() -> None:
     assert "X usage unavailable" in text
     # Haiku cost still shown — degradation is X-side only.
     assert "$0.12 Haiku" in text
+
+
+def test_digest_cost_footer_omits_x_segment_when_not_configured() -> None:
+    """A forked HN/Reddit-only project with no sources/x.yaml: the
+    footer should not mention X at all — neither 'usage unavailable'
+    nor a usage line. Clean output for deployments that never touched X.
+    """
+    payload = build_digest(
+        [_item()],
+        DigestStats(
+            day=date(2026, 4, 19),
+            haiku_cost_usd=0.12,
+            total_labeled=143,
+            x_configured=False,  # explicit: X not in this project
+            x_usage=None,
+        ),
+        _cfg(project="opendata"),
+    )
+    text = _all_text(payload["blocks"])
+    # Footer carries the Haiku line and the labeled count, nothing about X.
+    assert "$0.12 Haiku" in text
+    assert "143 items labeled" in text
+    assert "X usage" not in text
+    assert "X month-to-date" not in text
+    # Specifically the word "X " doesn't slip into the footer line.
+    footer_line = next(
+        b["text"]["text"]
+        for b in payload["blocks"]
+        if b.get("type") == "section" and "items labeled" in b.get("text", {}).get("text", "")
+    )
+    assert " X " not in footer_line
 
 
 def test_digest_does_not_include_cli_copy_paste_commands() -> None:

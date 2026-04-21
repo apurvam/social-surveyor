@@ -243,13 +243,33 @@ def _compute_digest_stats(
     total_labeled = count_labeled_ids(labels_path(project, projects_root=projects_root))
     accuracy_pct = _latest_accuracy_pct(projects_root / project)
 
+    x_configured = _project_has_x(project, projects_root)
+    x_usage = (
+        _resolve_x_usage(project, projects_root, http_client=http_client)
+        if x_configured
+        else None
+    )
+
     return DigestStats(
         day=datetime.now(UTC).date(),
         haiku_cost_usd=haiku_cost,
         total_labeled=total_labeled,
         accuracy_pct=accuracy_pct,
-        x_usage=_resolve_x_usage(project, projects_root, http_client=http_client),
+        x_configured=x_configured,
+        x_usage=x_usage,
     )
+
+
+def _project_has_x(project: str, projects_root: Path) -> bool:
+    """True when the project's ``sources/x.yaml`` exists and loads
+    successfully. Centralized so the footer's "X is configured" check
+    and the usage-fetch gate are in one place.
+    """
+    try:
+        cfg = load_project_config(project, projects_root=projects_root)
+    except ConfigError:
+        return False
+    return cfg.x is not None
 
 
 def _resolve_x_usage(
@@ -258,20 +278,15 @@ def _resolve_x_usage(
     *,
     http_client: Any = None,
 ) -> XUsageSnapshot | None:
-    """Pull the current X-project usage. ``None`` when X isn't configured
-    or the API call fails — the footer handles both cases.
+    """Pull the current X-project usage. ``None`` when the API call
+    fails or ``X_BEARER_TOKEN`` is missing. Caller guarantees X is
+    configured for this project (see :func:`_project_has_x`).
 
     ``http_client`` (optional) is forwarded to :func:`fetch_x_usage`
     so tests can mock the call through a shared transport. ``None``
     lets ``fetch_x_usage`` create a short-lived client per call (prod
     path: once per digest cycle).
     """
-    try:
-        cfg = load_project_config(project, projects_root=projects_root)
-    except ConfigError:
-        return None
-    if cfg.x is None:
-        return None
     import os
 
     token = os.environ.get("X_BEARER_TOKEN")

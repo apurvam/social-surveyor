@@ -205,9 +205,14 @@ class DigestStats:
     ``x_usage`` is the authoritative month-to-date consumption pulled
     from X's ``/2/usage/tweets`` endpoint. X doesn't expose a dollar
     figure via the API, so the footer shows posts-consumed rather than
-    a locally-estimated cost. ``None`` means the fetch failed or X
-    isn't configured for this project — footer degrades to a short
-    fallback note.
+    a locally-estimated cost.
+
+    ``x_configured`` gates the footer's X segment. When False (no
+    ``sources/x.yaml`` in the project) the segment is omitted entirely
+    — saying "X usage unavailable" for a project that never used X
+    would be noise, especially for forks that run only HN/Reddit. When
+    True and ``x_usage`` is None, the footer renders a short "usage
+    unavailable" note because we *expected* data and didn't get it.
     """
 
     day: date
@@ -215,6 +220,7 @@ class DigestStats:
     total_labeled: int
     # Latest eval accuracy, or None if no eval has been run / recorded.
     accuracy_pct: float | None = None
+    x_configured: bool = False
     x_usage: XUsageSnapshot | None = None
 
 
@@ -522,20 +528,22 @@ def _cost_footer(stats: DigestStats) -> list[dict[str, Any]]:
     accuracy_bit = (
         f" · {stats.accuracy_pct:.1f}% accuracy" if stats.accuracy_pct is not None else ""
     )
-    if stats.x_usage is not None:
-        x_bit = (
-            f"X month-to-date: {stats.x_usage.project_usage:,}/"
-            f"{stats.x_usage.project_cap:,} posts "
-            f"({stats.x_usage.percent:.1f}%, resets in "
-            f"{stats.x_usage.cap_reset_day} days)"
-        )
-    else:
-        x_bit = "X usage unavailable (API unreachable)"
-    cost_text = (
-        f"_Today: ${stats.haiku_cost_usd:.2f} Haiku · "
-        f"{x_bit} · "
-        f"{stats.total_labeled} items labeled{accuracy_bit}_"
-    )
+    segments = [f"Today: ${stats.haiku_cost_usd:.2f} Haiku"]
+    if stats.x_configured:
+        if stats.x_usage is not None:
+            segments.append(
+                f"X month-to-date: {stats.x_usage.project_usage:,}/"
+                f"{stats.x_usage.project_cap:,} posts "
+                f"({stats.x_usage.percent:.1f}%, resets in "
+                f"{stats.x_usage.cap_reset_day} days)"
+            )
+        else:
+            segments.append("X usage unavailable (API unreachable)")
+    # When X isn't configured for the project, omit the segment
+    # entirely — a forked HN/Reddit-only deployment shouldn't see an
+    # X footer line at all.
+    segments.append(f"{stats.total_labeled} items labeled{accuracy_bit}")
+    cost_text = "_" + " · ".join(segments) + "_"
 
     return [
         {"type": "divider"},
