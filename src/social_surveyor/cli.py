@@ -162,16 +162,43 @@ def run_poll(
     the same function without going through typer. A failure in one
     source (e.g. GitHub rate limit) is logged but doesn't stop the
     remaining sources.
+
+    The X source is gated by :func:`cost_caps.enforce_x_cap` before its
+    fetch — halt state skips X for the day and posts a once-per-UTC-day
+    infra alert, mirroring the Haiku classify-path gate.
     """
+    from .cost_caps import enforce_x_cap
+
     try:
         cfg = load_project_config(project, projects_root=projects_root)
     except ConfigError as e:
         raise typer.BadParameter(str(e)) from None
     names = _select_source_names(cfg, source)
+    # Routing config is only needed for X cap enforcement (infra
+    # channel resolution). Loading it lazily keeps poll-only projects
+    # that don't have a routing.yaml — e.g., test fixtures with just
+    # a single non-X source — working without requiring the file.
+    routing_cfg = None
+    if "x" in names and cfg.x is not None:
+        try:
+            routing_cfg = load_routing_config(project, projects_root=projects_root)
+        except ConfigError:
+            log.warning(
+                "poll.x_cap.no_routing_cfg",
+                project=project,
+                note="X polling proceeds without cap-exceeded infra alert",
+            )
 
     real_db = Storage(_db_path(project))
     try:
         for name in names:
+            if (
+                name == "x"
+                and cfg.x is not None
+                and routing_cfg is not None
+                and not enforce_x_cap(real_db, routing_cfg, cfg.x.daily_read_cap)
+            ):
+                continue
             src = _build_source(name, cfg, real_db)
             try:
                 items = src.fetch()

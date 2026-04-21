@@ -17,12 +17,17 @@ from social_surveyor.config import (
 )
 from social_surveyor.cost_caps import (
     HAIKU_CAP_ALERT_KIND,
+    X_CAP_ALERT_KIND,
     HaikuCapCheck,
+    XCapCheck,
     check_haiku_cap,
+    check_x_cap,
     enforce_haiku_cap,
+    enforce_x_cap,
     resolve_infra_channel,
     today_haiku_tokens,
     today_utc_iso,
+    today_x_reads,
 )
 from social_surveyor.notifier import InfraAlertChannel
 from social_surveyor.storage import Storage
@@ -378,3 +383,126 @@ def test_alert_kind_constant_is_stable() -> None:
     """Pin the constant — changing it silently would orphan the
     idempotency key and re-page on next deploy."""
     assert HAIKU_CAP_ALERT_KIND == "haiku_cap_exceeded"
+
+
+# --- X cap ------------------------------------------------------------------
+
+
+def _seed_x_reads(db: Storage, count: int) -> None:
+    """Record ``count`` X posts as a single api_usage row stamped now."""
+    db.record_api_usage(source="x", query_name="cost_complaints", items_fetched=count)
+
+
+def _seed_x_reads_at(db: Storage, when: datetime, count: int) -> None:
+    db._conn.execute(  # type: ignore[attr-defined]
+        """
+        INSERT INTO api_usage (source, query_name, items_fetched, fetched_at,
+                               input_tokens, output_tokens)
+        VALUES (?, ?, ?, ?, NULL, NULL)
+        """,
+        ("x", "cost_complaints", count, when.astimezone(UTC).isoformat()),
+    )
+
+
+def test_today_x_reads_sums_today_only(tmp_path: Path) -> None:
+    """Yesterday's reads don't contribute to today's total."""
+    with Storage(tmp_path / "t.db") as db:
+        # Today
+        _seed_x_reads(db, 50)
+        _seed_x_reads(db, 30)
+        # Yesterday
+        yesterday = datetime.now(UTC) - timedelta(days=1)
+        _seed_x_reads_at(db, yesterday, 1000)
+        assert today_x_reads(db) == 80
+
+
+def test_check_x_cap_states(tmp_path: Path) -> None:
+    with Storage(tmp_path / "t.db") as db:
+        _seed_x_reads(db, 300)
+        assert check_x_cap(db, 500).state == "ok"  # 60%
+    with Storage(tmp_path / "t2.db") as db:
+        _seed_x_reads(db, 410)
+        assert check_x_cap(db, 500).state == "warn"  # 82%
+    with Storage(tmp_path / "t3.db") as db:
+        _seed_x_reads(db, 500)
+        assert check_x_cap(db, 500).state == "halt"
+
+
+def test_check_x_cap_zero_cap_is_unlimited(tmp_path: Path) -> None:
+    with Storage(tmp_path / "t.db") as db:
+        _seed_x_reads(db, 99_999)
+        assert check_x_cap(db, 0).state == "ok"
+
+
+def test_enforce_x_cap_returns_true_below_cap(tmp_path: Path) -> None:
+    with Storage(tmp_path / "t.db") as db:
+        _seed_x_reads(db, 100)
+        assert enforce_x_cap(db, _routing(), cap=500) is True
+
+
+def test_enforce_x_cap_halts_and_posts_once(tmp_path: Path) -> None:
+    """First halt posts, subsequent halts same day skip — same dedup
+    shape as the Haiku cap."""
+    transport = _StubTransport()
+    client = httpx.Client(transport=transport)
+    channel = InfraAlertChannel(
+        webhook_url="https://hooks.slack.test/ABC",
+        source="infra",
+        prefix="",
+    )
+
+    with Storage(tmp_path / "t.db") as db:
+        _seed_x_reads(db, 500)
+
+        r1 = enforce_x_cap(db, _routing(), cap=500, infra_channel=channel, http_client=client)
+        assert r1 is False
+        assert len(transport.calls) == 1
+
+        # Same UTC day: no repeat post.
+        r2 = enforce_x_cap(db, _routing(), cap=500, infra_channel=channel, http_client=client)
+        assert r2 is False
+        assert len(transport.calls) == 1
+
+        body = transport.calls[0].content.decode()
+        assert "X daily read cap exceeded" in body
+        assert "500/500" in body
+
+    client.close()
+
+
+def test_enforce_x_cap_posts_each_new_day(tmp_path: Path) -> None:
+    transport = _StubTransport()
+    client = httpx.Client(transport=transport)
+    channel = InfraAlertChannel(
+        webhook_url="https://hooks.slack.test/ABC",
+        source="infra",
+        prefix="",
+    )
+
+    day1 = datetime(2026, 4, 20, 12, 0, tzinfo=UTC)
+    day2 = datetime(2026, 4, 21, 12, 0, tzinfo=UTC)
+
+    with Storage(tmp_path / "t.db") as db:
+        _seed_x_reads_at(db, day1, 600)
+        _seed_x_reads_at(db, day2, 600)
+
+        enforce_x_cap(db, _routing(), cap=500, infra_channel=channel, http_client=client, now=day1)
+        enforce_x_cap(db, _routing(), cap=500, infra_channel=channel, http_client=client, now=day2)
+
+    assert len(transport.calls) == 2
+    client.close()
+
+
+def test_enforce_x_cap_halts_without_channel(tmp_path: Path) -> None:
+    with Storage(tmp_path / "t.db") as db:
+        _seed_x_reads(db, 600)
+        assert enforce_x_cap(db, _routing(), cap=500, infra_channel=None) is False
+
+
+def test_x_alert_kind_constant_is_stable() -> None:
+    assert X_CAP_ALERT_KIND == "x_cap_exceeded"
+
+
+def test_xcapcheck_percent() -> None:
+    assert XCapCheck(state="warn", today_reads=400, cap=500).percent == pytest.approx(80.0)
+    assert XCapCheck(state="ok", today_reads=0, cap=0).percent == 0.0

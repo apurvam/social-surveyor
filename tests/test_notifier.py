@@ -145,7 +145,6 @@ def test_digest_empty_day_still_sends_a_message() -> None:
         DigestStats(
             day=date(2026, 4, 19),
             haiku_cost_usd=0.0,
-            x_cost_usd=0.0,
             total_labeled=143,
             accuracy_pct=61.5,
         ),
@@ -180,7 +179,6 @@ def test_digest_renders_categories_in_fixed_order() -> None:
         DigestStats(
             day=date(2026, 4, 19),
             haiku_cost_usd=0.12,
-            x_cost_usd=0.0,
             total_labeled=143,
         ),
         _cfg(),
@@ -211,7 +209,6 @@ def test_digest_top_n_caps_category_and_shows_overflow_hint() -> None:
         DigestStats(
             day=date(2026, 4, 19),
             haiku_cost_usd=0.0,
-            x_cost_usd=0.0,
             total_labeled=0,
         ),
         _cfg(project="opendata"),
@@ -235,7 +232,7 @@ def test_digest_no_overflow_hint_when_under_cap() -> None:
     ]
     payload = build_digest(
         items,
-        DigestStats(day=date(2026, 4, 19), haiku_cost_usd=0, x_cost_usd=0, total_labeled=0),
+        DigestStats(day=date(2026, 4, 19), haiku_cost_usd=0, total_labeled=0),
         _cfg(),
     )
     text = _all_text(payload["blocks"])
@@ -259,7 +256,7 @@ def test_digest_has_no_alerted_earlier_section() -> None:
     ]
     payload = build_digest(
         items,
-        DigestStats(day=date(2026, 4, 19), haiku_cost_usd=0, x_cost_usd=0, total_labeled=0),
+        DigestStats(day=date(2026, 4, 19), haiku_cost_usd=0, total_labeled=0),
         _cfg(),
     )
     text = _all_text(payload["blocks"])
@@ -280,7 +277,7 @@ def test_digest_silenced_within_window_shows_marker() -> None:
     )
     payload = build_digest(
         [silenced],
-        DigestStats(day=date(2026, 4, 19), haiku_cost_usd=0, x_cost_usd=0, total_labeled=0),
+        DigestStats(day=date(2026, 4, 19), haiku_cost_usd=0, total_labeled=0),
         _cfg(),
     )
     text = _all_text(payload["blocks"])
@@ -289,22 +286,45 @@ def test_digest_silenced_within_window_shows_marker() -> None:
 
 
 def test_digest_cost_footer_includes_accuracy() -> None:
+    from social_surveyor.notifier import XUsageSnapshot
+
     payload = build_digest(
         [_item()],
         DigestStats(
             day=date(2026, 4, 19),
             haiku_cost_usd=0.12,
-            x_cost_usd=0.15,
             total_labeled=143,
             accuracy_pct=61.5,
+            x_usage=XUsageSnapshot(project_usage=143, project_cap=10_000, cap_reset_day=21),
         ),
         _cfg(project="opendata"),
     )
     text = _all_text(payload["blocks"])
     assert "$0.12 Haiku" in text
-    assert "$0.15 X" in text
+    # X now renders as authoritative posts-consumed, not a $ figure.
+    assert "143/10,000 posts" in text
+    assert "resets in 21 days" in text
     assert "143 items labeled" in text
     assert "61.5% accuracy" in text
+
+
+def test_digest_cost_footer_degrades_when_x_usage_unavailable() -> None:
+    """When /2/usage/tweets can't be reached, the footer shows a short
+    'unavailable' note rather than a made-up number."""
+    payload = build_digest(
+        [_item()],
+        DigestStats(
+            day=date(2026, 4, 19),
+            haiku_cost_usd=0.12,
+            total_labeled=143,
+            x_usage=None,
+        ),
+        _cfg(project="opendata"),
+    )
+    text = _all_text(payload["blocks"])
+    assert "X usage unavailable" in text
+    # Haiku cost still shown — degradation is X-side only.
+    assert "$0.12 Haiku" in text
 
 
 def test_digest_does_not_include_cli_copy_paste_commands() -> None:
@@ -312,7 +332,7 @@ def test_digest_does_not_include_cli_copy_paste_commands() -> None:
     pointer, the category listing, or the correction footer block."""
     payload = build_digest(
         [_item()],
-        DigestStats(day=date(2026, 4, 19), haiku_cost_usd=0, x_cost_usd=0, total_labeled=1),
+        DigestStats(day=date(2026, 4, 19), haiku_cost_usd=0, total_labeled=1),
         _cfg(project="opendata"),
     )
     text = _all_text(payload["blocks"])
@@ -339,7 +359,6 @@ def test_digest_uses_header_blocks_for_hierarchy() -> None:
         DigestStats(
             day=date(2026, 4, 19),
             haiku_cost_usd=0.0,
-            x_cost_usd=0.0,
             total_labeled=0,
         ),
         _cfg(),
@@ -362,7 +381,7 @@ def test_digest_item_title_is_hyperlinked_to_url() -> None:
     )
     payload = build_digest(
         [item],
-        DigestStats(day=date(2026, 4, 19), haiku_cost_usd=0, x_cost_usd=0, total_labeled=0),
+        DigestStats(day=date(2026, 4, 19), haiku_cost_usd=0, total_labeled=0),
         _cfg(),
     )
     text = _all_text(payload["blocks"])
@@ -379,7 +398,7 @@ def test_digest_item_without_url_falls_back_to_plain_title() -> None:
     item = _item(url=None, title="No link available")
     payload = build_digest(
         [item],
-        DigestStats(day=date(2026, 4, 19), haiku_cost_usd=0, x_cost_usd=0, total_labeled=0),
+        DigestStats(day=date(2026, 4, 19), haiku_cost_usd=0, total_labeled=0),
         _cfg(),
     )
     text = _all_text(payload["blocks"])
@@ -398,7 +417,7 @@ def test_digest_item_title_escapes_pipe_and_angle_brackets() -> None:
     )
     payload = build_digest(
         [item],
-        DigestStats(day=date(2026, 4, 19), haiku_cost_usd=0, x_cost_usd=0, total_labeled=0),
+        DigestStats(day=date(2026, 4, 19), haiku_cost_usd=0, total_labeled=0),
         _cfg(),
     )
     text = _all_text(payload["blocks"])
@@ -421,7 +440,7 @@ def test_digest_items_include_bare_item_id_subtext() -> None:
     )
     payload = build_digest(
         [item],
-        DigestStats(day=date(2026, 4, 19), haiku_cost_usd=0, x_cost_usd=0, total_labeled=0),
+        DigestStats(day=date(2026, 4, 19), haiku_cost_usd=0, total_labeled=0),
         _cfg(),
     )
     text = _all_text(payload["blocks"])
@@ -440,7 +459,7 @@ def test_digest_x_items_allow_up_to_280_chars() -> None:
     item = _item(item_id="x:1", source="x", title=long_post, category="neutral_discussion")
     payload = build_digest(
         [item],
-        DigestStats(day=date(2026, 4, 19), haiku_cost_usd=0, x_cost_usd=0, total_labeled=0),
+        DigestStats(day=date(2026, 4, 19), haiku_cost_usd=0, total_labeled=0),
         _cfg(),
     )
     text = _all_text(payload["blocks"])
@@ -449,7 +468,7 @@ def test_digest_x_items_allow_up_to_280_chars() -> None:
     too_long = _item(item_id="x:2", source="x", title="B" * 300, category="neutral_discussion")
     payload2 = build_digest(
         [too_long],
-        DigestStats(day=date(2026, 4, 19), haiku_cost_usd=0, x_cost_usd=0, total_labeled=0),
+        DigestStats(day=date(2026, 4, 19), haiku_cost_usd=0, total_labeled=0),
         _cfg(),
     )
     text2 = _all_text(payload2["blocks"])
@@ -467,7 +486,7 @@ def test_digest_item_includes_body_preview_when_body_present() -> None:
     )
     payload = build_digest(
         [item],
-        DigestStats(day=date(2026, 4, 19), haiku_cost_usd=0, x_cost_usd=0, total_labeled=0),
+        DigestStats(day=date(2026, 4, 19), haiku_cost_usd=0, total_labeled=0),
         _cfg(),
     )
     text = _all_text(payload["blocks"])
@@ -479,7 +498,7 @@ def test_digest_item_body_preview_truncated_for_long_body() -> None:
     item = _item(title="some title", body=long_body)
     payload = build_digest(
         [item],
-        DigestStats(day=date(2026, 4, 19), haiku_cost_usd=0, x_cost_usd=0, total_labeled=0),
+        DigestStats(day=date(2026, 4, 19), haiku_cost_usd=0, total_labeled=0),
         _cfg(),
     )
     text = _all_text(payload["blocks"])
@@ -496,7 +515,7 @@ def test_digest_item_body_preview_collapses_internal_whitespace() -> None:
     )
     payload = build_digest(
         [item],
-        DigestStats(day=date(2026, 4, 19), haiku_cost_usd=0, x_cost_usd=0, total_labeled=0),
+        DigestStats(day=date(2026, 4, 19), haiku_cost_usd=0, total_labeled=0),
         _cfg(),
     )
     text = _all_text(payload["blocks"])
@@ -509,7 +528,7 @@ def test_digest_item_without_body_has_no_preview_line() -> None:
     item = _item(title="A link-only story", body=None)
     payload = build_digest(
         [item],
-        DigestStats(day=date(2026, 4, 19), haiku_cost_usd=0, x_cost_usd=0, total_labeled=0),
+        DigestStats(day=date(2026, 4, 19), haiku_cost_usd=0, total_labeled=0),
         _cfg(),
     )
     # Find the item block and confirm it's one line only (no trailing
@@ -531,7 +550,7 @@ def test_digest_items_do_not_include_author() -> None:
     item = _item(title="some title", author="the-author")
     payload = build_digest(
         [item],
-        DigestStats(day=date(2026, 4, 19), haiku_cost_usd=0, x_cost_usd=0, total_labeled=0),
+        DigestStats(day=date(2026, 4, 19), haiku_cost_usd=0, total_labeled=0),
         _cfg(),
     )
     text = _all_text(payload["blocks"])
@@ -555,7 +574,7 @@ def test_digest_uses_human_category_labels_when_available() -> None:
     ]
     payload = build_digest(
         items,
-        DigestStats(day=date(2026, 4, 19), haiku_cost_usd=0, x_cost_usd=0, total_labeled=0),
+        DigestStats(day=date(2026, 4, 19), haiku_cost_usd=0, total_labeled=0),
         cfg,
     )
     text = _all_text(payload["blocks"])
@@ -575,14 +594,14 @@ def test_digest_category_header_singular_vs_plural() -> None:
     single = _all_text(
         build_digest(
             [one_item],
-            DigestStats(day=date(2026, 4, 19), haiku_cost_usd=0, x_cost_usd=0, total_labeled=0),
+            DigestStats(day=date(2026, 4, 19), haiku_cost_usd=0, total_labeled=0),
             _cfg(),
         )["blocks"]
     )
     plural = _all_text(
         build_digest(
             two_items,
-            DigestStats(day=date(2026, 4, 19), haiku_cost_usd=0, x_cost_usd=0, total_labeled=0),
+            DigestStats(day=date(2026, 4, 19), haiku_cost_usd=0, total_labeled=0),
             _cfg(),
         )["blocks"]
     )
@@ -620,7 +639,7 @@ def test_digest_total_blocks_stays_under_slack_limit_on_worst_case() -> None:
             )
     payload = build_digest(
         items,
-        DigestStats(day=date(2026, 4, 19), haiku_cost_usd=0, x_cost_usd=0, total_labeled=0),
+        DigestStats(day=date(2026, 4, 19), haiku_cost_usd=0, total_labeled=0),
         _cfg(),
     )
     assert len(payload["blocks"]) <= SLACK_MAX_BLOCKS
@@ -650,7 +669,7 @@ def test_digest_dropped_categories_get_context_notice() -> None:
             )
     payload = build_digest(
         items,
-        DigestStats(day=date(2026, 4, 19), haiku_cost_usd=0, x_cost_usd=0, total_labeled=0),
+        DigestStats(day=date(2026, 4, 19), haiku_cost_usd=0, total_labeled=0),
         _cfg(),
     )
     text = _all_text(payload["blocks"])
@@ -669,7 +688,7 @@ def test_digest_light_day_no_budget_trim() -> None:
     ]
     payload = build_digest(
         items,
-        DigestStats(day=date(2026, 4, 19), haiku_cost_usd=0.1, x_cost_usd=0.0, total_labeled=3),
+        DigestStats(day=date(2026, 4, 19), haiku_cost_usd=0.1, total_labeled=3),
         _cfg(),
     )
     text = _all_text(payload["blocks"])

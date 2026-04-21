@@ -13,7 +13,9 @@ from social_surveyor.sources.base import SourceInitError
 from social_surveyor.sources.x import (
     BACKFILL_MAX_DAYS,
     XSource,
+    XUsage,
     _synthesize_tweet_title,
+    fetch_x_usage,
 )
 from social_surveyor.storage import Storage
 
@@ -165,3 +167,66 @@ def test_synthesize_tweet_title_truncates_long_text() -> None:
     long = "a" * 200
     assert _synthesize_tweet_title(long).endswith("…")
     assert len(_synthesize_tweet_title(long)) <= 80
+
+
+# --- fetch_x_usage ---------------------------------------------------------
+
+
+def _usage_handler(payload: dict[str, Any], *, status: int = 200):
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.path == "/2/usage/tweets"
+        assert request.headers.get("Authorization") == "Bearer TEST_TOKEN"
+        return httpx.Response(status, json=payload)
+
+    return handler
+
+
+def test_fetch_x_usage_parses_happy_path() -> None:
+    payload = {
+        "data": {
+            "project_usage": 143,
+            "project_cap": 10_000,
+            "cap_reset_day": 21,
+        }
+    }
+    client = httpx.Client(transport=httpx.MockTransport(_usage_handler(payload)))
+    try:
+        usage = fetch_x_usage("TEST_TOKEN", client=client)
+    finally:
+        client.close()
+    assert usage == XUsage(project_usage=143, project_cap=10_000, cap_reset_day=21)
+    assert usage.percent == pytest.approx(1.43)
+
+
+def test_fetch_x_usage_returns_none_on_non_200() -> None:
+    """Auth blip / 401 / 5xx should degrade, not raise — the digest post
+    must continue."""
+    client = httpx.Client(
+        transport=httpx.MockTransport(_usage_handler({"detail": "auth failed"}, status=401))
+    )
+    try:
+        assert fetch_x_usage("TEST_TOKEN", client=client) is None
+    finally:
+        client.close()
+
+
+def test_fetch_x_usage_returns_none_on_transport_error() -> None:
+    def raising(_request: httpx.Request) -> httpx.Response:
+        raise httpx.ConnectError("dns down")
+
+    client = httpx.Client(transport=httpx.MockTransport(raising))
+    try:
+        assert fetch_x_usage("TEST_TOKEN", client=client) is None
+    finally:
+        client.close()
+
+
+def test_fetch_x_usage_returns_none_on_missing_fields() -> None:
+    """Malformed response (missing required field) shouldn't crash the
+    digest footer."""
+    payload = {"data": {"project_usage": 143}}  # missing project_cap, cap_reset_day
+    client = httpx.Client(transport=httpx.MockTransport(_usage_handler(payload)))
+    try:
+        assert fetch_x_usage("TEST_TOKEN", client=client) is None
+    finally:
+        client.close()

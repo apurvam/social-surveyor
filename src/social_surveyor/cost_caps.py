@@ -1,25 +1,28 @@
-"""Daily Haiku token cost-cap enforcement.
+"""Daily cost-cap enforcement for Anthropic (Haiku tokens) and X (post reads).
 
-The check runs at the start of every classify invocation (not per
-item) and halts classification for the rest of the UTC day when
-today's input+output tokens exceed
-``routing_cfg.cost_caps.daily_haiku_tokens``. Day rollover is UTC
-midnight — simple and predictable. Once the clock rolls past midnight
-the running total resets to 0 and classification resumes on the next
-cycle.
+Both caps follow the same shape:
 
-Two failure modes the cap guards against:
+- A ``check_*_cap`` function classifies today's usage against a cap
+  into ``ok`` / ``warn`` / ``halt``.
+- An ``enforce_*_cap`` function runs the check, emits a ``warn`` log
+  when ≥80% of cap, and on ``halt`` posts a ``fatal`` infra alert —
+  idempotent per UTC day via the ``infra_alerts`` table so a 10-minute
+  scheduler loop doesn't spam the channel.
+- The caller takes the return value as a go/no-go: ``True`` continue,
+  ``False`` skip the expensive work.
+
+Haiku runs at the start of every classify invocation. X runs at the
+start of every poll cycle, before any X search is issued. Day
+rollover is UTC midnight for both.
+
+Failure modes the caps guard against:
 
 1. A runaway classification loop (stuck retry, reclassify-everything
-   script left running) that chews through Anthropic credits before a
-   human notices.
+   script left running) that chews through Anthropic credits.
 2. An accidental backfill of a huge item set at full prompt cost.
-
-Infra alerts on halt are idempotent per UTC day via the ``infra_alerts``
-table — subsequent checks on the same day see the row and skip the
-Slack post, so a 10-minute scheduler loop doesn't spam the channel.
-The 80%-of-cap warning fires on every classify cycle while in that
-band (cheap, non-paging) so the operator sees the runaway early.
+3. A runaway X polling loop (e.g., ``since_id`` returning the same
+   tweet repeatedly) that burns through X's per-post billing before a
+   human notices.
 """
 
 from __future__ import annotations
@@ -41,10 +44,11 @@ CapState = Literal["ok", "warn", "halt"]
 
 WARN_FRACTION = 0.8
 
-# Alert kind used to de-dupe cost-cap infra alerts against the
+# Alert kinds used to de-dupe cost-cap infra alerts against the
 # ``infra_alerts`` table. One row per (alert_kind, UTC date) means at
-# most one cap-exceeded Slack post per day.
+# most one cap-exceeded Slack post per day per cap.
 HAIKU_CAP_ALERT_KIND = "haiku_cap_exceeded"
+X_CAP_ALERT_KIND = "x_cap_exceeded"
 
 
 @dataclass(frozen=True)
@@ -235,14 +239,146 @@ def enforce_haiku_cap(
     return False
 
 
+# --- X (posts-read) cap ------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class XCapCheck:
+    """Result of an X cap check. Shape mirrors :class:`HaikuCapCheck`."""
+
+    state: CapState
+    today_reads: int
+    cap: int
+
+    @property
+    def percent(self) -> float:
+        return (self.today_reads / self.cap * 100.0) if self.cap > 0 else 0.0
+
+
+def today_x_reads(db: Storage, *, now: datetime | None = None) -> int:
+    """Sum of ``items_fetched`` for the ``x`` source since UTC midnight.
+
+    Reads are recorded by :class:`sources.x.XSource` as one row per
+    response. Because of upstream ``since_id`` quirks the local count
+    can drift from what X bills for — the cap uses it as an upper-bound
+    proxy (over-report leans toward conservative halt; under-report
+    would be more concerning but hasn't been observed).
+    """
+    effective_now = (now or datetime.now(UTC)).astimezone(UTC)
+    start_of_day = effective_now.replace(hour=0, minute=0, second=0, microsecond=0)
+    return int(db.sum_api_usage("x", start_of_day))
+
+
+def check_x_cap(
+    db: Storage,
+    cap: int,
+    *,
+    now: datetime | None = None,
+) -> XCapCheck:
+    """Classify today's X reads against ``cap`` — ``ok``/``warn``/``halt``.
+
+    A cap of 0 is "unlimited" (matches :func:`check_haiku_cap`).
+    """
+    total = today_x_reads(db, now=now)
+    if cap <= 0:
+        state: CapState = "ok"
+    elif total >= cap:
+        state = "halt"
+    elif total >= int(cap * WARN_FRACTION):
+        state = "warn"
+    else:
+        state = "ok"
+    return XCapCheck(state=state, today_reads=total, cap=cap)
+
+
+def enforce_x_cap(
+    db: Storage,
+    routing_cfg: RoutingConfig,
+    cap: int,
+    *,
+    now: datetime | None = None,
+    infra_channel: InfraAlertChannel | None = None,
+    http_client: Any | None = None,
+    echo_fn: Any = None,
+) -> bool:
+    """Run the X cap check and post-once infra alert. Return ``True`` to
+    continue polling, ``False`` to halt.
+
+    ``cap`` is the per-project X-reads ceiling (currently sourced from
+    ``cfg.x.daily_read_cap`` in the X source YAML). Passed explicitly
+    rather than read from ``routing_cfg.cost_caps.daily_x_reads`` —
+    that field is legacy documentation and is not the effective cap.
+    ``routing_cfg`` is still needed for infra-channel resolution.
+    """
+    result = check_x_cap(db, cap, now=now)
+
+    if result.state == "warn":
+        log.warning(
+            "x.daily_cap_approaching",
+            today_reads=result.today_reads,
+            cap=result.cap,
+            percent=round(result.percent, 1),
+        )
+        return True
+
+    if result.state != "halt":
+        return True
+
+    log.error(
+        "x.daily_cap_exceeded",
+        today_reads=result.today_reads,
+        cap=result.cap,
+        percent=round(result.percent, 1),
+    )
+    if echo_fn is not None:
+        echo_fn(
+            f"HALT: X daily read cap exceeded "
+            f"({result.today_reads:,}/{result.cap:,} reads today, "
+            f"{result.percent:.1f}%). Polling resumes after UTC midnight."
+        )
+
+    day_iso = today_utc_iso(now)
+    if not db.record_infra_alert_once(X_CAP_ALERT_KIND, day_iso):
+        log.info("x.daily_cap_alert.already_posted", day=day_iso)
+        return False
+
+    channel = infra_channel or resolve_infra_channel(routing_cfg)
+    if channel is None:
+        log.error("x.daily_cap_alert.no_channel", day=day_iso)
+        return False
+
+    subject = (
+        f"X daily read cap exceeded: {result.today_reads:,}/"
+        f"{result.cap:,} reads today ({result.percent:.1f}%)"
+    )
+    body = "X polling halted until UTC midnight rollover."
+    try:
+        post_infra_alert(
+            channel,
+            subject=subject,
+            body=body,
+            severity="fatal",
+            client=http_client,
+        )
+        log.info("x.daily_cap_alert.posted", channel=channel.source, day=day_iso)
+    except Exception as exc:
+        log.exception("x.daily_cap_alert.failed", error=repr(exc), day=day_iso)
+    return False
+
+
 __all__ = [
     "HAIKU_CAP_ALERT_KIND",
     "WARN_FRACTION",
+    "X_CAP_ALERT_KIND",
     "CapState",
     "HaikuCapCheck",
+    "XCapCheck",
     "check_haiku_cap",
+    "check_x_cap",
     "enforce_haiku_cap",
+    "enforce_x_cap",
     "resolve_infra_channel",
     "today_haiku_tokens",
     "today_utc_iso",
+    "today_x_reads",
 ]

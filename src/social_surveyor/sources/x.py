@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
@@ -22,11 +23,86 @@ log = structlog.get_logger(__name__)
 
 API_BASE = "https://api.x.com/2"
 RECENT_SEARCH_PATH = "/tweets/search/recent"
+USAGE_TWEETS_PATH = "/usage/tweets"
 
 # Recent Search has a hard 7-day retention window. Anything older needs
 # full-archive search, which has different pricing and isn't wired up
 # here yet — see the session 2 PR description.
 BACKFILL_MAX_DAYS = 7
+
+
+@dataclass(frozen=True)
+class XUsage:
+    """Authoritative project-level X usage as returned by ``GET /2/usage/tweets``.
+
+    Fields match the X API response shape. X doesn't publish a dollar
+    figure via the API — the ``Total Cost`` on the Developer Console is
+    rendered client-side only — so this dataclass captures consumption
+    only. Callers render "N of M this month" rather than a $ estimate.
+    """
+
+    project_usage: int
+    project_cap: int
+    cap_reset_day: int
+
+    @property
+    def percent(self) -> float:
+        return (self.project_usage / self.project_cap * 100.0) if self.project_cap > 0 else 0.0
+
+
+def fetch_x_usage(
+    bearer_token: str,
+    *,
+    client: httpx.Client | None = None,
+    timeout: float = 10.0,
+) -> XUsage | None:
+    """Call ``GET /2/usage/tweets`` and return the parsed response, or ``None``
+    on any HTTP/parse failure.
+
+    Returns ``None`` (not raise) on errors because the caller — currently
+    the digest footer — should degrade gracefully: a transient auth
+    error or rate-limit blip shouldn't abort the digest post. The
+    structured log records the failure for ops visibility.
+
+    ``client`` is injectable for tests via ``httpx.MockTransport``.
+    """
+    owns_client = client is None
+    if client is None:
+        client = httpx.Client(timeout=timeout)
+    try:
+        resp = client.get(
+            API_BASE + USAGE_TWEETS_PATH,
+            headers={"Authorization": f"Bearer {bearer_token}"},
+        )
+    except httpx.HTTPError as exc:
+        log.warning("x.usage.http_error", error=repr(exc))
+        if owns_client:
+            client.close()
+        return None
+
+    try:
+        if resp.status_code != 200:
+            log.warning(
+                "x.usage.non_200",
+                status=resp.status_code,
+                body=resp.text[:200],
+            )
+            return None
+        payload = resp.json()
+    finally:
+        if owns_client:
+            client.close()
+
+    data = payload.get("data") or {}
+    try:
+        return XUsage(
+            project_usage=int(data["project_usage"]),
+            project_cap=int(data["project_cap"]),
+            cap_reset_day=int(data["cap_reset_day"]),
+        )
+    except (KeyError, TypeError, ValueError) as exc:
+        log.warning("x.usage.parse_error", error=repr(exc), data=data)
+        return None
 
 
 class XSource(Source):
