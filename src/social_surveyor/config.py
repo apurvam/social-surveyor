@@ -267,15 +267,18 @@ class DigestConfig(BaseModel):
 
 
 class CostCapsConfig(BaseModel):
-    """Hard daily ceilings. ``daily_haiku_tokens`` is enforced by the
-    cost-cap check that runs at the start of every classify invocation;
-    ``daily_x_reads`` is enforced by the X source's own per-call
-    preflight (Session 2)."""
+    """Hard daily ceilings.
+
+    ``daily_haiku_tokens`` is enforced by :func:`cost_caps.enforce_haiku_cap`
+    at the start of every classify invocation. The X cap used to live
+    here too as ``daily_x_reads`` but was never actually read —
+    enforcement has always been driven by ``cfg.x.daily_read_cap`` in
+    ``projects/<n>/sources/x.yaml``. The duplicate field is gone.
+    """
 
     model_config = ConfigDict(extra="forbid")
 
     daily_haiku_tokens: int = Field(default=500_000, ge=0)
-    daily_x_reads: int = Field(default=2_000, ge=0)
 
 
 class InfraConfig(BaseModel):

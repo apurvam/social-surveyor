@@ -29,16 +29,18 @@ from typing import Any
 import typer
 
 from .cli_eval import HAIKU_INPUT_USD_PER_MTOK, HAIKU_OUTPUT_USD_PER_MTOK
-from .config import ConfigError, load_categories, load_routing_config
+from .config import ConfigError, load_categories, load_project_config, load_routing_config
 from .labeling import count_labeled_ids, labels_path
 from .notifier import (
     DigestStats,
     NotifierConfig,
     NotifierItem,
+    XUsageSnapshot,
     build_digest,
     post_to_slack,
 )
 from .secrets import SecretNotFoundError, resolve_secret
+from .sources.x import fetch_x_usage
 from .storage import Storage
 
 
@@ -98,7 +100,13 @@ def run_digest(
             )
 
         items = _collect_digest_items(db, window_start=window_start)
-        stats = _compute_digest_stats(db, project, projects_root, window_start=window_start)
+        stats = _compute_digest_stats(
+            db,
+            project,
+            projects_root,
+            window_start=window_start,
+            http_client=http_client,
+        )
 
         payload = build_digest(items, stats, notifier_cfg)
 
@@ -210,28 +218,87 @@ def _compute_digest_stats(
     projects_root: Path,
     *,
     window_start: datetime,
+    http_client: Any = None,
 ) -> DigestStats:
-    """Compute cost + accuracy footer data. Degrades gracefully."""
+    """Compute cost + accuracy footer data. Degrades gracefully.
+
+    X usage comes from ``/2/usage/tweets`` (authoritative), not a local
+    counter multiplied by an assumed rate. A fetch failure (auth blip,
+    rate limit, network) leaves ``x_usage=None`` so the footer renders
+    a short fallback; the rest of the digest is unaffected.
+
+    ``http_client`` is the single ``httpx.Client`` threaded down from
+    :func:`run_digest` — shared with the Slack poster. Tests pass a
+    ``MockTransport`` client and handle both hosts in one handler so
+    no branch in this codepath reaches live network.
+    """
+    del window_start  # accepted for signature symmetry with collectors
     today_start = datetime.now(UTC).replace(hour=0, minute=0, second=0, microsecond=0)
     haiku_in, haiku_out = db.sum_api_tokens("anthropic", today_start)
     haiku_cost = (
         haiku_in / 1_000_000 * HAIKU_INPUT_USD_PER_MTOK
         + haiku_out / 1_000_000 * HAIKU_OUTPUT_USD_PER_MTOK
     )
-    x_reads = db.sum_api_usage("x", today_start)
-    # $0.005 per X read is the pay-per-use tier price as of Session 2.5.
-    # If the price moves we update here and in the X source's cost-cap.
-    x_cost = x_reads * 0.005
 
     total_labeled = count_labeled_ids(labels_path(project, projects_root=projects_root))
     accuracy_pct = _latest_accuracy_pct(projects_root / project)
 
+    x_configured = _project_has_x(project, projects_root)
+    x_usage = (
+        _resolve_x_usage(project, projects_root, http_client=http_client)
+        if x_configured
+        else None
+    )
+
     return DigestStats(
         day=datetime.now(UTC).date(),
         haiku_cost_usd=haiku_cost,
-        x_cost_usd=x_cost,
         total_labeled=total_labeled,
         accuracy_pct=accuracy_pct,
+        x_configured=x_configured,
+        x_usage=x_usage,
+    )
+
+
+def _project_has_x(project: str, projects_root: Path) -> bool:
+    """True when the project's ``sources/x.yaml`` exists and loads
+    successfully. Centralized so the footer's "X is configured" check
+    and the usage-fetch gate are in one place.
+    """
+    try:
+        cfg = load_project_config(project, projects_root=projects_root)
+    except ConfigError:
+        return False
+    return cfg.x is not None
+
+
+def _resolve_x_usage(
+    project: str,
+    projects_root: Path,
+    *,
+    http_client: Any = None,
+) -> XUsageSnapshot | None:
+    """Pull the current X-project usage. ``None`` when the API call
+    fails or ``X_BEARER_TOKEN`` is missing. Caller guarantees X is
+    configured for this project (see :func:`_project_has_x`).
+
+    ``http_client`` (optional) is forwarded to :func:`fetch_x_usage`
+    so tests can mock the call through a shared transport. ``None``
+    lets ``fetch_x_usage`` create a short-lived client per call (prod
+    path: once per digest cycle).
+    """
+    import os
+
+    token = os.environ.get("X_BEARER_TOKEN")
+    if not token:
+        return None
+    usage = fetch_x_usage(token, client=http_client)
+    if usage is None:
+        return None
+    return XUsageSnapshot(
+        project_usage=usage.project_usage,
+        project_cap=usage.project_cap,
+        cap_reset_day=usage.cap_reset_day,
     )
 
 

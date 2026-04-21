@@ -181,15 +181,47 @@ class NotifierItem:
 
 
 @dataclass(frozen=True)
+class XUsageSnapshot:
+    """Authoritative X usage for the digest footer.
+
+    Populated from :func:`sources.x.fetch_x_usage` at digest-build time.
+    None means the usage API wasn't reachable or wasn't configured —
+    footer falls back to a 'X usage unavailable' note.
+    """
+
+    project_usage: int
+    project_cap: int
+    cap_reset_day: int
+
+    @property
+    def percent(self) -> float:
+        return (self.project_usage / self.project_cap * 100.0) if self.project_cap > 0 else 0.0
+
+
+@dataclass(frozen=True)
 class DigestStats:
-    """Cost + accuracy footer for the digest."""
+    """Cost + accuracy footer for the digest.
+
+    ``x_usage`` is the authoritative month-to-date consumption pulled
+    from X's ``/2/usage/tweets`` endpoint. X doesn't expose a dollar
+    figure via the API, so the footer shows posts-consumed rather than
+    a locally-estimated cost.
+
+    ``x_configured`` gates the footer's X segment. When False (no
+    ``sources/x.yaml`` in the project) the segment is omitted entirely
+    — saying "X usage unavailable" for a project that never used X
+    would be noise, especially for forks that run only HN/Reddit. When
+    True and ``x_usage`` is None, the footer renders a short "usage
+    unavailable" note because we *expected* data and didn't get it.
+    """
 
     day: date
     haiku_cost_usd: float
-    x_cost_usd: float
     total_labeled: int
     # Latest eval accuracy, or None if no eval has been run / recorded.
     accuracy_pct: float | None = None
+    x_configured: bool = False
+    x_usage: XUsageSnapshot | None = None
 
 
 # --- builders ----------------------------------------------------------------
@@ -288,7 +320,11 @@ def build_digest(
     # which gives the digest a clear visual top. Header blocks are
     # plain_text only (no mrkdwn), so we drop the `*bold*` wrapping —
     # header text is already visually bold on its own.
-    total_cost = stats.haiku_cost_usd + stats.x_cost_usd
+    #
+    # Header used to carry a combined "$X today" figure. That was a
+    # local estimate for X (posts times a hard-coded rate) and drifted
+    # ~3x from what X actually billed. Cost detail lives in the footer
+    # now, sourced from authoritative endpoints where available.
     if not items:
         top_header_text = f"📊 Digest for {stats.day.isoformat()} — no new items in the last 24h"
     else:
@@ -296,8 +332,7 @@ def build_digest(
         cats_noun = "category" if len(ordered_categories) == 1 else "categories"
         top_header_text = (
             f"📊 Digest for {stats.day.isoformat()} · "
-            f"{len(items)} {items_noun} · {len(ordered_categories)} {cats_noun} · "
-            f"${total_cost:.2f}"
+            f"{len(items)} {items_noun} · {len(ordered_categories)} {cats_noun}"
         )
     blocks.append(_header_block(top_header_text))
 
@@ -479,18 +514,36 @@ def _header_block(text: str) -> dict[str, Any]:
 
 
 def _cost_footer(stats: DigestStats) -> list[dict[str, Any]]:
-    """Tail of every digest: divider + one section with today's cost and
-    labelling accuracy. Correction commands used to live here too; a
-    coding agent driving the correction workflow doesn't need them, so
-    they were removed."""
+    """Tail of every digest: divider + one section with today's Haiku
+    cost, X month-to-date usage pulled from X's own API, and labelling
+    accuracy.
+
+    X is shown as posts-consumed rather than dollars because X's
+    ``/2/usage/tweets`` endpoint doesn't expose pricing — the dollar
+    figure in the Developer Console is console-only. This is the
+    authoritative number (not a local estimate), so operators can trust
+    it. When the X API call fails, the footer degrades to a short
+    'unavailable' note.
+    """
     accuracy_bit = (
         f" · {stats.accuracy_pct:.1f}% accuracy" if stats.accuracy_pct is not None else ""
     )
-    cost_text = (
-        f"_Today: ${stats.haiku_cost_usd:.2f} Haiku · "
-        f"${stats.x_cost_usd:.2f} X · "
-        f"{stats.total_labeled} items labeled{accuracy_bit}_"
-    )
+    segments = [f"Today: ${stats.haiku_cost_usd:.2f} Haiku"]
+    if stats.x_configured:
+        if stats.x_usage is not None:
+            segments.append(
+                f"X month-to-date: {stats.x_usage.project_usage:,}/"
+                f"{stats.x_usage.project_cap:,} posts "
+                f"({stats.x_usage.percent:.1f}%, resets in "
+                f"{stats.x_usage.cap_reset_day} days)"
+            )
+        else:
+            segments.append("X usage unavailable (API unreachable)")
+    # When X isn't configured for the project, omit the segment
+    # entirely — a forked HN/Reddit-only deployment shouldn't see an
+    # X footer line at all.
+    segments.append(f"{stats.total_labeled} items labeled{accuracy_bit}")
+    cost_text = "_" + " · ".join(segments) + "_"
 
     return [
         {"type": "divider"},
@@ -682,6 +735,7 @@ __all__ = [
     "NotifierConfig",
     "NotifierItem",
     "SlackPostError",
+    "XUsageSnapshot",
     "build_digest",
     "build_immediate_alert",
     "build_infra_alert",
