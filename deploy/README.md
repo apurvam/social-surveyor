@@ -188,6 +188,110 @@ sudo -u social-surveyor bash -c \
 
 ---
 
+## 8. Adding a new project to an existing deploy
+
+Once the first project is running, stacking a second (or nth) project
+on the same instance is configuration-only — no new EC2, IAM, SG, or
+Pulumi work. The systemd template unit `social-surveyor@.service` runs
+one process per project; each owns its own SQLite file, its own SSM
+prefix, and its own Slack webhooks.
+
+Prereqs:
+
+- `projects/<new-project>/` is committed to the repo — the four YAMLs
+  (`categories.yaml`, `classifier.yaml`, `routing.yaml`,
+  `sources/*.yaml`) all load cleanly under
+  `uv run social-surveyor poll --project <new-project> --dry-run`
+  locally first.
+- The new project's `routing.yaml` uses distinct secret names (convention:
+  `<PROJECT>_<SERVICE>_<PURPOSE>`, e.g.
+  `OPENDATA_BRAND_SLACK_WEBHOOK_IMMEDIATE`). Reusing the same Slack
+  channel across projects is fine — just seed the same webhook URL
+  under each project's secret names.
+
+### 8.1 — Seed SSM secrets (one-time, from the laptop)
+
+Put the new project's secrets in a dedicated env file so the first
+project's `.env` stays untouched:
+
+```bash
+# .env.opendata-brand — one file per project
+OPENDATA_BRAND_SLACK_WEBHOOK_IMMEDIATE=https://hooks.slack.com/...
+OPENDATA_BRAND_SLACK_WEBHOOK_DIGEST=https://hooks.slack.com/...
+OPENDATA_BRAND_SLACK_WEBHOOK_INFRA=https://hooks.slack.com/...
+ANTHROPIC_API_KEY=sk-ant-...
+X_BEARER_TOKEN=AAAA...
+```
+
+Then:
+
+```bash
+SOCIAL_SURVEYOR_ENV_FILE=.env.opendata-brand \
+    AWS_PROFILE=prod deploy/seed-ssm.sh opendata-brand
+```
+
+That writes each line to `/social-surveyor/opendata-brand/<KEY>` as a
+SecureString, keeping the namespaces isolated from the first project.
+
+Verify:
+
+```bash
+AWS_PROFILE=prod aws ssm get-parameters-by-path \
+    --path /social-surveyor/opendata-brand \
+    --query 'Parameters[*].Name' --output table
+```
+
+### 8.2 — Redeploy the codebase so the new project directory lands on the instance
+
+The new project's YAMLs need to exist on disk under
+`/opt/social-surveyor/projects/<new-project>/`. After the PR that adds
+them is merged:
+
+```bash
+AWS_PROFILE=prod deploy/deploy.sh              # deploys origin/main HEAD
+```
+
+`deploy.sh` restarts the `--project opendata` systemd instance by
+default; the new project's instance doesn't exist yet, so this is a
+no-op for it. That's fine.
+
+### 8.3 — Provision per-project state and start the service (on the instance, via SSM)
+
+```bash
+AWS_PROFILE=prod aws ssm start-session \
+    --target "$(cd deploy/pulumi && pulumi stack output instance_id)" \
+    --region us-west-2
+```
+
+On the instance:
+
+```bash
+# Data directory (one per project)
+sudo mkdir -p /var/lib/social-surveyor/opendata-brand
+sudo chown -R social-surveyor:social-surveyor /var/lib/social-surveyor/opendata-brand
+
+# Marshal secrets from SSM into /etc/social-surveyor/opendata-brand.env
+sudo /usr/local/bin/social-surveyor-load-env opendata-brand
+
+# Dry-run first to sanity-check the config loads and queries return
+# plausible items
+sudo -u social-surveyor bash -c \
+    'cd /opt/social-surveyor && \
+     SOCIAL_SURVEYOR_DATA_DIR=/var/lib/social-surveyor/opendata-brand \
+     uv run social-surveyor poll --project opendata-brand --dry-run'
+
+# Enable and start
+sudo systemctl enable --now social-surveyor@opendata-brand
+
+# Watch the first cycle
+sudo journalctl -u social-surveyor@opendata-brand -f
+```
+
+Both services run in parallel on the same box; `systemctl list-units
+'social-surveyor@*'` shows all instances and their states.
+
+---
+
 ## Backup and recovery
 
 The Pulumi stack creates a Data Lifecycle Manager (DLM) policy that
