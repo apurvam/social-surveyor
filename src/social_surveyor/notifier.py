@@ -61,16 +61,6 @@ CATEGORY_COLORS: dict[str, str] = {
     "off_topic": "#8c564b",
 }
 
-CATEGORY_EMOJI: dict[str, str] = {
-    "cost_complaint": "💰",
-    "self_host_intent": "🛠️",
-    "competitor_pain": "⚠️",
-    "active_practitioner": "🔧",
-    "neutral_discussion": "💬",
-    "tutorial_or_marketing": "📘",
-    "off_topic": "🚫",
-}
-
 # Section order in the digest. Fixed so day-to-day scannability doesn't
 # depend on which categories happened to fire that day. Alert-worthy
 # first, then the relationship-building bucket, then context.
@@ -396,14 +386,13 @@ def _build_category_group(
     top = cat_items_sorted[:TOP_N_PER_CATEGORY]
     overflow = len(cat_items_sorted) - len(top)
 
-    emoji = CATEGORY_EMOJI.get(cat, "•")
     cat_display = config.category_display(cat)
     total_in_cat = len(cat_items_sorted)
     noun = "item" if total_in_cat == 1 else "items"
     if overflow > 0:
-        header_line = f"{emoji} {cat_display} · {total_in_cat} {noun} (top {len(top)} by urgency)"
+        header_line = f"{cat_display} · {total_in_cat} {noun} (top {len(top)} by urgency)"
     else:
-        header_line = f"{emoji} {cat_display} · {total_in_cat} {noun}"
+        header_line = f"{cat_display} · {total_in_cat} {noun}"
 
     group: list[dict[str, Any]] = [{"type": "divider"}, _header_block(header_line)]
     for item in top:
@@ -736,7 +725,6 @@ def post_infra_alert(
 
 __all__ = [
     "CATEGORY_COLORS",
-    "CATEGORY_EMOJI",
     "DIGEST_CATEGORY_ORDER",
     "SLACK_MAX_BLOCKS",
     "TOP_N_PER_CATEGORY",
