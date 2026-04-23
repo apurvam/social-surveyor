@@ -28,8 +28,17 @@ caller = aws.get_caller_identity()
 account_id = caller.account_id
 
 # Strip leading slash so the SSM parameter ARN interpolates cleanly.
-# Stored prefix form: "/social-surveyor/opendata"
-# ARN resource form:  "parameter/social-surveyor/opendata/..."
+# Stored prefix form: "/social-surveyor"
+# ARN resource form:  "parameter/social-surveyor/..."
+#
+# The prefix names the *root* of the SSM namespace this instance can
+# read from, not a single project's prefix. Each project running on
+# the instance owns a sub-path (e.g. /social-surveyor/opendata,
+# /social-surveyor/opendata-brand) and the systemd unit sets
+# SOCIAL_SURVEYOR_SSM_PREFIX=/social-surveyor/%i at runtime, so the
+# runtime lookup is always project-scoped. The IAM policy's resource
+# pattern covers everything under the root so new projects can stack
+# on an existing instance without a Pulumi change.
 ssm_prefix_clean = ssm_parameter_prefix.lstrip("/")
 
 # --- AMI lookup: latest Ubuntu 24.04 LTS ARM64 from Canonical ---

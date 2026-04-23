@@ -39,14 +39,18 @@ config:
   # projects on one instance, bump to t4g.small.
   social-surveyor:instance_type: t4g.micro
 
-  # --- Secret storage prefix ---
-  # The instance IAM role is scoped to read only under this SSM prefix.
-  # `deploy/seed-ssm.sh` writes every KEY from your local .env to
-  # <prefix>/<KEY> as a SecureString. The systemd unit then sets
-  # SOCIAL_SURVEYOR_SSM_PREFIX=<prefix>, which is the opt-in signal
-  # for secrets.resolve_secret's SSM fallback.
-  # Convention: /social-surveyor/<project_name>
-  social-surveyor:ssm_parameter_prefix: /social-surveyor/opendata
+  # --- Secret storage root ---
+  # Names the root of the SSM namespace the instance IAM role can read
+  # from. Each project running on the instance owns a sub-path
+  # (<root>/<project>/<KEY>); the systemd unit sets
+  # SOCIAL_SURVEYOR_SSM_PREFIX=<root>/%i at runtime so the per-process
+  # lookup is always project-scoped. Broad IAM + narrow runtime lookup
+  # lets a second (or nth) project stack on an existing instance
+  # without a Pulumi change.
+  # `deploy/seed-ssm.sh <project>` writes every KEY from .env to
+  # <root>/<project>/<KEY> as a SecureString.
+  # Convention: /social-surveyor (then sub-paths per project).
+  social-surveyor:ssm_parameter_prefix: /social-surveyor
 
   # --- Optional: SSH keypair ---
   # Leave empty (the default) to rely on SSM Session Manager for all
