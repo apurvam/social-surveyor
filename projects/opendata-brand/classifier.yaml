@@ -1,48 +1,159 @@
-# Classifier configuration for a project.
-#
-# The prompt is assembled from the fields below plus the taxonomy
-# defined in categories.yaml. Bump `prompt_version` whenever you
-# change a field that affects prompt content — classifications are
-# stamped with the version that produced them, so the eval harness
-# can compare v1 vs v2 without re-classifying items.
-#
-# For a fork: replace `icp_description` with your own product context.
+# Classifier configuration for opendata-brand monitoring.
+# See projects/example/classifier.yaml for field-by-field documentation.
 
 version: 1
 prompt_version: "v1"
 
-# Path (relative to this project dir) of the taxonomy this classifier
-# binds to. Stays "categories.yaml" until Session 5.5's public/private
-# config split, if we ever do that.
 categories_file: "categories.yaml"
 
 icp_description: |
-  Generic devtool monitoring example. Replace this with your own ICP
-  description — who the user is, what they sell, who they're trying to
-  reach, and what signal in a social post indicates a real engagement
-  opportunity versus noise. This string goes verbatim into the system
-  prompt, so write it for the model, not for a teammate.
+  The user runs OpenData, an open source project building a fleet of
+  object-store-native databases on a shared SlateDB foundation. All
+  MIT-licensed, built in Rust, under github.com/opendata-oss/opendata.
+  Website: opendata.dev.
 
-# Examples the classifier should pay attention to. Empty in v1; populate
-# during prompt iteration when the eval harness surfaces a specific
-# failure mode that a few-shot example would fix.
-#
-# Shape (uncomment and fill in to add one):
-# few_shot_examples:
-#   - title: "Why we moved off Datadog"
-#     body: "After three quarters at $80k we're switching to self-hosted..."
-#     expected_category: cost_complaint
-#     expected_urgency: 8
-#     note: "Explicit dollar amount + active evaluation — classic high-urgency cost complaint."
+  The fleet:
+  - OpenData Timeseries — Prometheus-compatible metrics database
+    (launched April 16, 2026, v0.2.1). Competes with VictoriaMetrics,
+    Mimir, Cortex, Thanos, Grafana Cloud, Amazon Managed Prometheus,
+    Datadog.
+  - OpenData Log — event streaming with replayable log per key; docs
+    available, early. Positioned as Kafka v2 on object storage.
+    Competes with WarpStream, Kafka + tiered storage, Redpanda.
+  - OpenData Vector — SPANN-style approximate nearest neighbor; docs
+    available, early. Competes with Turbopuffer, Pinecone, Weaviate,
+    Qdrant, Milvus, Chroma.
+  - OpenData KeyValue — object-store-native key-value; docs available,
+    early.
+  - SlateDB — the shared LSM storage layer; foundational, separate
+    project at slatedb.io / github.com/slatedb/slatedb.
+  - Ingest — stateless ingestion service; RFC stage.
+
+  We monitor public conversation about any OpenData database, SlateDB,
+  or the object-store-native database ecosystem broadly — including
+  questions, issues, comparisons, and general discussion. The purpose
+  is engagement (answering questions, acknowledging issues, joining
+  comparisons) and market awareness (how the object-store-native thesis
+  is being discussed).
+
+  Critical disambiguation. Our product family is called "OpenData"
+  but "open data" is also a generic term for government transparency
+  data (data.gov, NYC Open Data), open-access academic datasets
+  (Kaggle), and the EU Open Data Directive. Only classify posts as
+  in-scope when they're clearly about OUR products — indicated by
+  qualified names ("OpenData Timeseries" etc.), unique identifiers
+  (opendata.dev, opendata-oss, SlateDB), or strong context (object-
+  store-native database discussion naming us). Generic "open data"
+  discussion is off_topic.
+
+additional_instructions: |
+  Classification rules (apply in order):
+
+  1. First, decide whether the post is about our products, SlateDB,
+     or the object-store-native database space we're part of.
+
+     High-signal indicators that it IS about us:
+     - Explicit product names: "OpenData Timeseries", "OpenData Log",
+       "OpenData Vector", "OpenData KeyValue"
+     - Unique identifiers: opendata.dev, opendata-oss, SlateDB
+     - Strong contextual match: object-store-native database
+       discussion (Prometheus-compatible / Kafka-like / ANN / KV) AND
+       at least one OpenData-fleet or SlateDB reference
+
+     Indicators it is NOT about us (classify as off_topic):
+     - "open data" referring to government / civic data, data.gov,
+       NYC Open Data, open-access academic datasets, Kaggle, the EU
+       Open Data Directive
+     - "OpenData" as a generic or metaphorical term in a context that
+       clearly doesn't fit a database product
+     - Unrelated uses of "log", "vector", "keyvalue" next to
+       "OpenData" in text that's really about something else
+     - "object store" in a file-system / archival-storage context
+       with no database implications
+     - Unrelated "s3 native" mentions (mobile apps, file uploads)
+
+     Ecosystem discussion (no direct OpenData / SlateDB mention but
+     clearly about object-store-native databases — WarpStream
+     architecture, Turbopuffer benchmarks, "why S3-native is the
+     future" posts) is in-scope: classify as ecosystem_discussion.
+
+  2. If the post IS about an OpenData database or SlateDB, identify
+     the author's intent:
+
+     a. direct_question: author asks a specific question. Any product
+        in the fleet counts. Includes roadmap and decision questions.
+        Examples:
+        - "Does OpenData Timeseries support remote write from Vector?"
+        - "How is OpenData Log different from WarpStream?"
+        - "Is SlateDB production-ready for my key-value use case?"
+        - "Anyone running OpenData Vector in production yet?"
+
+     b. issue_or_complaint: concrete problem with an OpenData product
+        or SlateDB. Requires an actual problem, not opinion.
+        Examples:
+        - "I hit a panic when ingesting into OpenData Timeseries"
+        - "Cold query latency on OpenData is worse than I expected"
+        - "SlateDB compaction seems to stall on my workload"
+        Criticism-as-opinion ("I don't believe in object-store-native
+        databases") is positive_mention's negative form, not
+        issue_or_complaint — this category is for actual problems.
+
+     c. comparison: third-party analytical comparison with alternatives
+        where OpenData or SlateDB is named. Examples:
+        - "OpenData Timeseries vs Mimir: a deep dive"
+        - "SlateDB vs RocksDB for object-native workloads"
+        - "Object-store-native TSDBs compared: OpenData, VictoriaMetrics..."
+        Distinct from direct_question (author is seeking a comparison);
+        this is the author DOING the comparison.
+
+     d. positive_mention: author speaks well of OpenData or SlateDB
+        without asking a question or providing a structured comparison.
+        Examples:
+        - "Just tried OpenData Timeseries, very cool"
+        - "SlateDB is what the LSM ecosystem needed"
+
+     e. neutral_mention: mention without strong sentiment. Sharing a
+        link, passing reference, listing us among projects.
+
+  3. If the post is about the object-store-native database space BUT
+     doesn't name OpenData or SlateDB, classify as ecosystem_discussion.
+     Examples:
+     - "WarpStream's architecture is interesting because..."
+     - "Why S3-native databases will win"
+     - "Turbopuffer benchmark writeup"
+     - "The future of Kafka is object storage"
+     OpenData's positioning IS this thesis — worth tracking.
+
+  4. Precedence when torn:
+     direct_question > issue_or_complaint > comparison >
+     positive_mention > neutral_mention > ecosystem_discussion >
+     off_topic
+
+  Urgency guidance (independent of category):
+  - 9-10: direct question from a potential adopter where a quick
+    helpful response changes outcomes; high-visibility negative
+    mention needing rapid engagement
+  - 7-8: active third-party comparison, substantive issue report,
+    question with moderate audience (HN front page, popular subreddit),
+    well-placed positive review
+  - 4-6: positive mentions with decent audience, neutral mentions from
+    visible accounts, ecosystem_discussion with high engagement
+  - 0-3: low-audience neutral mentions, minor ecosystem references
+  - 0: off_topic (automatic)
+
+  Score urgency from the post's explicit signals independently of the
+  category. Do not let category uncertainty suppress urgency, and do
+  not let category confidence inflate urgency.
+
+  When reasoning, call out WHICH product or ecosystem topic the post
+  is about — this is the single most useful piece of context for the
+  operator to decide whether to engage.
+
 few_shot_examples: []
 
-# Anthropic API settings. Haiku is the default for cost; swap to Sonnet
-# only if eval accuracy plateaus at an unacceptable level on Haiku.
 model: "claude-haiku-4-5-20251001"
 max_tokens: 500
-temperature: 0.0  # deterministic classification
+temperature: 0.0
 
-# Retry behavior on transient API failures (network errors, 5xx).
-# Malformed-JSON responses get one free re-prompt independently.
 max_retries: 1
 backoff_seconds: 2.0
