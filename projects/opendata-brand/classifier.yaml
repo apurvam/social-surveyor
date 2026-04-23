@@ -1,0 +1,48 @@
+# Classifier configuration for a project.
+#
+# The prompt is assembled from the fields below plus the taxonomy
+# defined in categories.yaml. Bump `prompt_version` whenever you
+# change a field that affects prompt content — classifications are
+# stamped with the version that produced them, so the eval harness
+# can compare v1 vs v2 without re-classifying items.
+#
+# For a fork: replace `icp_description` with your own product context.
+
+version: 1
+prompt_version: "v1"
+
+# Path (relative to this project dir) of the taxonomy this classifier
+# binds to. Stays "categories.yaml" until Session 5.5's public/private
+# config split, if we ever do that.
+categories_file: "categories.yaml"
+
+icp_description: |
+  Generic devtool monitoring example. Replace this with your own ICP
+  description — who the user is, what they sell, who they're trying to
+  reach, and what signal in a social post indicates a real engagement
+  opportunity versus noise. This string goes verbatim into the system
+  prompt, so write it for the model, not for a teammate.
+
+# Examples the classifier should pay attention to. Empty in v1; populate
+# during prompt iteration when the eval harness surfaces a specific
+# failure mode that a few-shot example would fix.
+#
+# Shape (uncomment and fill in to add one):
+# few_shot_examples:
+#   - title: "Why we moved off Datadog"
+#     body: "After three quarters at $80k we're switching to self-hosted..."
+#     expected_category: cost_complaint
+#     expected_urgency: 8
+#     note: "Explicit dollar amount + active evaluation — classic high-urgency cost complaint."
+few_shot_examples: []
+
+# Anthropic API settings. Haiku is the default for cost; swap to Sonnet
+# only if eval accuracy plateaus at an unacceptable level on Haiku.
+model: "claude-haiku-4-5-20251001"
+max_tokens: 500
+temperature: 0.0  # deterministic classification
+
+# Retry behavior on transient API failures (network errors, 5xx).
+# Malformed-JSON responses get one free re-prompt independently.
+max_retries: 1
+backoff_seconds: 2.0
