@@ -1,47 +1,48 @@
-# Routing configuration for a project.
+# Routing for the opendata-brand project.
 #
-# - immediate.alert_worthy_categories + threshold_urgency: the two
-#   conditions a classification must meet to fire an immediate Slack
-#   alert. Everything else goes to the daily digest.
-# - Webhook URLs live in env vars (or SSM in prod). This file names
-#   them; it never contains the URLs themselves.
-# - cost_caps: hard daily ceilings. daily_haiku_tokens is enforced at
-#   the start of every classify invocation; the check sums today's
-#   input+output tokens from api_usage and halts classification (and
-#   pages the infra channel once per UTC day) when the ceiling is
-#   crossed. X already has its own daily_read_cap enforced per-call.
-# - infra: optional webhook for ops-side alerts (cost-cap halts,
-#   future session-5c staleness alerts). If the secret name resolves,
-#   alerts land here; otherwise they fall back to the immediate
-#   webhook with a [INFRA] prefix so the operator still gets paged.
+# Alert-worthy categories (immediate): direct_question, issue_or_complaint,
+# comparison. These are the three buckets where a fast response from the
+# operator has real leverage — answering a public question, acknowledging
+# a concrete issue, joining a comparison while it's live. positive_mention
+# and neutral_mention are deliberately NOT alert-worthy; they land in the
+# daily digest. ecosystem_discussion is also digest-only — on-thesis but
+# not time-sensitive.
+#
+# max_item_age_hours is 24 (shorter than opendata's 72): for brand
+# monitoring, a three-day-old question has probably run its course.
+# Stale alerts are noise.
 
 version: 2
 
 immediate:
   threshold_urgency: 7
-  max_item_age_hours: 72
+  max_item_age_hours: 24
   alert_worthy_categories:
-    - cost_complaint
-    - self_host_intent
-    - competitor_pain
-  webhook_secret: EXAMPLE_SLACK_WEBHOOK_IMMEDIATE
+    - direct_question
+    - issue_or_complaint
+    - comparison
+  webhook_secret: OPENDATA_BRAND_SLACK_WEBHOOK_IMMEDIATE
 
 digest:
   schedule:
     hour: 9
     minute: 0
     timezone: "America/Los_Angeles"
-  webhook_secret: EXAMPLE_SLACK_WEBHOOK_DIGEST
+  webhook_secret: OPENDATA_BRAND_SLACK_WEBHOOK_DIGEST
   window_hours: 24
 
 cost_caps:
-  # Haiku daily token ceiling. X's daily read ceiling lives in
-  # sources/x.yaml as `daily_read_cap`, not here — see
-  # CostCapsConfig in config.py.
+  # Initial ceiling. Tune after a week of real (non-backfill) operation
+  # once steady-state volume is observable. Brand-monitoring volume is
+  # expected to be lower than the opendata project's since product-name
+  # queries are phrase-quoted and narrow — but keep headroom through
+  # the first backfill. The X daily read ceiling lives in sources/x.yaml
+  # as `daily_read_cap`, not here.
   daily_haiku_tokens: 500000
 
 infra:
-  # Leave commented out to skip the dedicated infra channel; the
-  # cost-cap fallback path will page the immediate channel with a
-  # [INFRA] prefix instead.
-  # webhook_secret: EXAMPLE_SLACK_WEBHOOK_INFRA
+  # Infra-channel webhook for cost-cap halts and future session-5c
+  # staleness alerts. Optional: if the env/SSM name below is unset at
+  # runtime, infra alerts fall back to the immediate webhook with a
+  # [INFRA] prefix so the operator still gets paged.
+  webhook_secret: OPENDATA_BRAND_SLACK_WEBHOOK_INFRA
