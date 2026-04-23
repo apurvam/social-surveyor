@@ -137,9 +137,11 @@ def test_immediate_alert_defensive_color_for_unknown_category() -> None:
 # --- digest ------------------------------------------------------------------
 
 
-def test_digest_empty_day_still_sends_a_message() -> None:
-    """Zero items in the window must still produce a payload — it's the
-    liveness signal that the pipeline is running."""
+def test_digest_empty_day_renders_payload_for_dry_run_inspection() -> None:
+    """Zero items still returns a valid payload for `--dry-run` inspection,
+    even though :func:`run_digest` now short-circuits the live post.
+    Header carries the project name + date so the empty output is
+    still unambiguous when the operator eyeballs the JSON."""
     payload = build_digest(
         [],
         DigestStats(
@@ -148,11 +150,29 @@ def test_digest_empty_day_still_sends_a_message() -> None:
             total_labeled=143,
             accuracy_pct=61.5,
         ),
-        _cfg(),
+        _cfg(project="opendata"),
     )
     text = _all_text(payload["blocks"])
-    assert "Digest for 2026-04-19" in text
+    assert "Digest for opendata · 2026-04-19" in text
     assert "no new items in the last 24h" in text
+
+
+def test_digest_header_includes_project_name() -> None:
+    """Top header names the project so a shared Slack channel can tell
+    two projects' digests apart at a glance without digging into the
+    body."""
+    items = [_item(item_id="hackernews:1", category="cost_complaint", urgency=7)]
+    payload = build_digest(
+        items,
+        DigestStats(
+            day=date(2026, 4, 19),
+            haiku_cost_usd=0.12,
+            total_labeled=0,
+        ),
+        _cfg(project="opendata-brand"),
+    )
+    headers = [b["text"]["text"] for b in payload["blocks"] if b.get("type") == "header"]
+    assert "Digest for opendata-brand · 2026-04-19" in headers[0]
 
 
 def test_digest_renders_categories_in_fixed_order() -> None:

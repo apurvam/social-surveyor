@@ -118,6 +118,18 @@ def run_digest(
                 "payload": payload,
             }
 
+        # Skip the Slack post when there's nothing to show. Multi-project
+        # deploys otherwise flood the digest channel with "no new items"
+        # cards that add no signal; liveness should come from a dedicated
+        # /health check (session 5c), not from a daily empty digest.
+        if not items:
+            echo_fn(f"digest skipped: 0 items in the last {routing_cfg.digest.window_hours}h")
+            return {
+                "posted": False,
+                "items": 0,
+                "skipped_empty": True,
+            }
+
         try:
             webhook_url = resolve_secret(routing_cfg.digest.webhook_secret)
         except SecretNotFoundError as e:
