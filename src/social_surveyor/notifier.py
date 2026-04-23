@@ -316,12 +316,15 @@ def build_digest(
     # ~3x from what X actually billed. Cost detail lives in the footer
     # now, sourced from authoritative endpoints where available.
     if not items:
-        top_header_text = f"📊 Digest for {stats.day.isoformat()} — no new items in the last 24h"
+        top_header_text = (
+            f"📊 Digest for {config.project} · {stats.day.isoformat()} "
+            f"— no new items in the last 24h"
+        )
     else:
         items_noun = "item" if len(items) == 1 else "items"
         cats_noun = "category" if len(ordered_categories) == 1 else "categories"
         top_header_text = (
-            f"📊 Digest for {stats.day.isoformat()} · "
+            f"📊 Digest for {config.project} · {stats.day.isoformat()} · "
             f"{len(items)} {items_noun} · {len(ordered_categories)} {cats_noun}"
         )
     blocks.append(_header_block(top_header_text))

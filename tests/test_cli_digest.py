@@ -177,6 +177,73 @@ def test_digest_posts_to_slack_and_marks_sent(
     assert all(r["sent_at"] is not None for r in rows)
 
 
+def test_digest_skips_slack_post_when_no_items(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Zero items in the window → no Slack POST. Multi-project deploys
+    otherwise flood the shared digest channel with empty liveness cards."""
+    projects_root = _write_project_configs(tmp_path)
+    _add_routing_yaml(projects_root)
+    db_path = tmp_path / "data" / "demo.db"
+
+    monkeypatch.setenv("TEST_DEMO_DIGEST_WEBHOOK", "https://hooks.example/digest")
+
+    # Prime the DB so the file exists (run_digest rejects a missing DB as
+    # "no poll yet"). No routed items = no digest-channel alerts.
+    with Storage(db_path):
+        pass
+
+    posted: list[httpx.Request] = []
+
+    def handler(req: httpx.Request) -> httpx.Response:
+        posted.append(req)
+        return httpx.Response(200, text="ok")
+
+    echoed: list[str] = []
+    result = run_digest(
+        "demo",
+        db_path,
+        projects_root,
+        dry_run=False,
+        http_client=httpx.Client(transport=httpx.MockTransport(handler)),
+        echo_fn=echoed.append,
+    )
+
+    assert result == {"posted": False, "items": 0, "skipped_empty": True}
+    assert posted == []
+    assert any("digest skipped" in line for line in echoed)
+
+
+def test_digest_dry_run_renders_empty_payload_for_inspection(tmp_path: Path) -> None:
+    """Even when there are no items, --dry-run still builds the payload
+    so the operator can eyeball the format. Only the live post path is
+    skipped on empty."""
+    projects_root = _write_project_configs(tmp_path)
+    _add_routing_yaml(projects_root)
+    db_path = tmp_path / "data" / "demo.db"
+
+    with Storage(db_path):
+        pass
+
+    echoed: list[str] = []
+    result = run_digest(
+        "demo",
+        db_path,
+        projects_root,
+        dry_run=True,
+        echo_fn=echoed.append,
+    )
+    assert result["posted"] is False
+    assert result["items"] == 0
+    assert "payload" in result
+    joined = "\n".join(echoed)
+    payload = json.loads(joined.split("\n\n")[0] if joined else "{}")
+    text = json.dumps(payload)
+    # Header still carries the project name so the empty payload is
+    # recognizable when eyeballed.
+    assert "Digest for demo" in text
+
+
 def test_digest_category_inspection_prints_to_stdout_not_slack(tmp_path: Path) -> None:
     projects_root = _write_project_configs(tmp_path)
     _add_routing_yaml(projects_root)
