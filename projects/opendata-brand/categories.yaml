@@ -1,0 +1,92 @@
+# Category taxonomy + urgency scale for opendata-brand monitoring.
+#
+# This taxonomy is organized around *what's being said about the
+# OpenData fleet / SlateDB / object-store-native space* rather than
+# buyer-intent (that's the opendata project's lens). Keep the `id`
+# values stable once labeling starts — renaming invalidates prior
+# labels.
+
+version: 1
+
+categories:
+  - id: direct_question
+    label: "Direct question about OpenData or SlateDB"
+    description: >
+      Author asks a specific question about any OpenData database
+      (Timeseries, Log, Vector, KeyValue) or SlateDB. Includes roadmap
+      questions ("when will Log be production-ready?"), feature
+      questions ("does Timeseries support remote write from X?"), and
+      decision questions ("should I pick OpenData Vector or
+      Turbopuffer?"). Highest-leverage items for engagement — a prompt,
+      helpful reply turns a public question into a demonstration of
+      care.
+
+  - id: issue_or_complaint
+    label: "Issue report or concrete complaint"
+    description: >
+      Author reports a concrete problem with any OpenData database or
+      SlateDB — a bug, performance issue, docs gap, or frustration
+      hitting the product. Even low-severity issues signal someone
+      tried it and hit friction. Distinct from general criticism
+      (opinion, not a concrete problem); this is about actual issues.
+
+  - id: comparison
+    label: "Comparison with alternatives"
+    description: >
+      Third-party analytical comparison of an OpenData database or
+      SlateDB with alternatives. Examples: OpenData Timeseries vs
+      VictoriaMetrics / Mimir / Thanos, OpenData Log vs WarpStream,
+      OpenData Vector vs Turbopuffer / Pinecone, SlateDB vs custom LSM
+      implementations. OpenData or SlateDB is named and is being
+      analyzed, not asked about. High-signal for understanding how
+      we're being positioned.
+
+  - id: positive_mention
+    label: "Positive mention or praise"
+    description: >
+      Author speaks positively about any OpenData database or SlateDB
+      — recommending it, sharing a good experience, calling attention
+      in an approving way. Distinct from questions and issues. Worth
+      acknowledging but not urgent.
+
+  - id: neutral_mention
+    label: "Neutral mention or link share"
+    description: >
+      Author mentions an OpenData database or SlateDB without strong
+      sentiment — sharing a blog post, mentioning us in a list,
+      passing reference in a broader discussion. Default bucket for
+      "something happened, low signal otherwise."
+
+  - id: ecosystem_discussion
+    label: "Object-store-native ecosystem discussion"
+    description: >
+      Discussion of the object-store-native database space broadly,
+      without direct mention of OpenData or SlateDB. Examples:
+      architectural blog posts about why object-store-native is the
+      future, comparisons of WarpStream and Turbopuffer, discussion
+      of S3 Express One Zone's implications for databases. Relevant
+      because OpenData's positioning IS the object-store-native
+      thesis; these discussions shape the market. Lower urgency than
+      direct mentions.
+
+  - id: off_topic
+    label: "Off topic (false positive)"
+    description: >
+      Matched on a keyword but not actually about OpenData, SlateDB,
+      or the object-store-native database space. Common false
+      positives: "open data" referring to government transparency data;
+      "OpenData" as a generic term (Kaggle datasets, academic data);
+      "log" or "vector" in unrelated contexts; "object store" in a
+      file-system / archival-storage context without database
+      implications; unrelated "s3 native" mentions (mobile apps, file
+      uploads).
+
+urgency_scale:
+  - range: [0, 3]
+    meaning: "Irrelevant or passive mention, don't alert"
+  - range: [4, 6]
+    meaning: "Relevant discussion but not a high-leverage engagement opportunity"
+  - range: [7, 8]
+    meaning: "Good engagement opportunity — person is actively discussing OpenData or the ecosystem"
+  - range: [9, 10]
+    meaning: "Urgent — direct question or high-visibility comparison/issue needing rapid engagement"

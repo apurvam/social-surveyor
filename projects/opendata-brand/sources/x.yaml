@@ -1,0 +1,33 @@
+# X config for opendata-brand monitoring.
+#
+# COSTS REAL MONEY — $0.005/post read on pay-per-use. daily_read_cap=500
+# is the initial ceiling; watch `api_usage` the first few days.
+#
+# Query shape notes. X's query DSL treats bare multi-word tokens as AND
+# (same as HN/Reddit) and honors "..." for phrase matches. We use
+# explicit phrase quotes on every multi-word identifier to defend
+# against the generic "open data" collision. `-is:retweet lang:en`
+# applied to every query to drop retweet spam and non-English noise.
+#
+# What's in: three query buckets — product names, unique identifiers,
+# and the ecosystem terms ("object-store-native", "s3-native").
+# What's out: "OpenData KeyValue" and "OpenData KV" are deliberately
+# omitted — expected volume is low and paid-per-read means each query
+# slot has a real cost. If KeyValue starts generating real discussion,
+# reintroduce then. Also watch whether the ecosystem query dominates
+# the read budget — if it does, drop it back to HN/Reddit-only where
+# calls are free.
+
+queries:
+  - name: "opendata_products"
+    query: '("OpenData Timeseries" OR "OpenData Log" OR "OpenData Vector") -is:retweet lang:en'
+
+  - name: "opendata_identifiers"
+    query: '("opendata.dev" OR "opendata-oss" OR SlateDB) -is:retweet lang:en'
+
+  - name: "ecosystem_terms"
+    query: '("object-store-native" OR "s3-native") -is:retweet lang:en'
+
+max_results_per_query: 100
+poll_interval_minutes: 30
+daily_read_cap: 500

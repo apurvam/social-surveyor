@@ -1,0 +1,44 @@
+# Hacker News config for opendata-brand monitoring.
+# Targets: product-specific mentions (high precision), unique identifiers
+# (very high signal), and the object-store-native / s3-native ecosystem.
+#
+# Quoting note. Algolia is configured with advancedSyntax=true and
+# typoTolerance=false (see sources/hackernews.py). Multi-token unquoted
+# queries AND the tokens across the post, which collides heavily with
+# generic "open data" usage for our product name. Literal '"..."' in
+# the YAML value forces a phrase match, so we phrase-quote every
+# multi-word query and also the dotted / hyphenated identifiers
+# (opendata.dev, opendata-oss) since Algolia tokenizes on those
+# separators. SlateDB is a distinct single token and needs no quoting.
+#
+# Ecosystem terminology — chosen after weighing the three-to-four top
+# variants with 2025-2026 traction against query-count overhead:
+# - "object-store-native" — appears in OpenData's own launch post plus
+#   turbopuffer / WarpStream marketing. Kept.
+# - "s3-native" — increasingly common in vendor pitches 2025-2026. Kept.
+# - "object store native" (unhyphenated) — largely redundant with the
+#   hyphenated form for HN content at the cost of more ambiguous intent.
+#   Dropped.
+# - "built on s3", "storage on s3" — too broad, catches unrelated
+#   app-level S3 usage. Dropped.
+# Revisit these if real discussions are getting missed during eval.
+
+queries:
+  # Product names (phrase-matched — defends against "open data" noise).
+  - '"OpenData Timeseries"'
+  - '"OpenData Log"'
+  - '"OpenData Vector"'
+  - '"OpenData KeyValue"'
+
+  # Unique identifiers. Phrase-quote the dotted/hyphenated ones so
+  # Algolia treats them as the whole string rather than AND-of-tokens.
+  - '"opendata.dev"'
+  - '"opendata-oss"'
+  - SlateDB
+
+  # Ecosystem terminology (top variants; expand only if eval shows misses).
+  - '"object-store-native"'
+  - '"s3-native"'
+
+tags: ["story", "comment"]
+max_results_per_query: 50

@@ -1,0 +1,61 @@
+# Reddit RSS config for opendata-brand monitoring.
+#
+# Mirrors the HN query set — product names phrase-quoted (Reddit RSS's
+# `q` param honors quoted phrases; see projects/opendata/sources/reddit.yaml
+# where '"new relic"' and '"grafana cloud"' have been validated live),
+# unique identifiers phrase-quoted for the ones with dots/hyphens,
+# ecosystem terms phrase-quoted.
+#
+# Subreddits span the plausible audience for a fleet of object-store-
+# native databases: observability ops (devops/sre/kubernetes/
+# observability/PrometheusMonitoring), infra (selfhosted/databases/
+# dataengineering), adjacent products (MachineLearning for Vector,
+# apachekafka for Log), codebase community (rust), and broad tech
+# discussion (programming/opensource). r/programming is intentionally
+# broad; watch for noise and drop subreddit-level during triage if the
+# signal is thin. Contrast with projects/opendata which dropped
+# r/selfhosted as a homelab-not-ops culture — for brand monitoring,
+# selfhosted is fair game because anyone self-hosting databases might
+# mention OpenData.
+
+reddit_username: amehta1618
+# 6s matches Reddit's observed bucket (100 req / ~10 min); see the
+# opendata project's session 2.5 findings for the derivation.
+min_seconds_between_requests: 6.0
+
+subreddits:
+  - devops
+  - sre
+  - kubernetes
+  - observability
+  - PrometheusMonitoring
+  - selfhosted
+  - databases
+  - dataengineering
+  - MachineLearning
+  - rust
+  - programming
+  - opensource
+  - apachekafka
+
+queries:
+  # Product names (phrase-matched).
+  - '"OpenData Timeseries"'
+  - '"OpenData Log"'
+  - '"OpenData Vector"'
+  - '"OpenData KeyValue"'
+
+  # Unique identifiers. Phrase-quoting the dotted/hyphenated ones.
+  - '"opendata.dev"'
+  - '"opendata-oss"'
+  - SlateDB
+
+  # Ecosystem terms.
+  - '"object-store-native"'
+  - '"s3-native"'
+
+limit_per_query: 100
+# `month` matches the opendata project's live-probe finding that the
+# week window returns ~5-10% of the month window on every query, and
+# storage dedup makes the wider window effectively free.
+time_filter: month
