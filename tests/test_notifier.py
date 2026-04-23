@@ -757,6 +757,44 @@ def test_post_to_slack_sends_payload_and_succeeds_on_200() -> None:
     assert "hello" in captured["body"]
 
 
+def test_post_to_slack_disables_link_unfurls() -> None:
+    import json
+
+    captured: dict[str, Any] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured["body"] = json.loads(request.content.decode())
+        return httpx.Response(200, text="ok")
+
+    client = httpx.Client(transport=httpx.MockTransport(handler))
+    try:
+        post_to_slack(
+            {"blocks": [{"type": "section", "text": {"type": "mrkdwn", "text": "hi"}}]},
+            "https://hooks.slack.example/X/Y/Z",
+            client=client,
+        )
+    finally:
+        client.close()
+
+    assert captured["body"]["unfurl_links"] is False
+    assert captured["body"]["unfurl_media"] is False
+
+
+def test_post_to_slack_does_not_mutate_caller_payload() -> None:
+    def handler(_req: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, text="ok")
+
+    payload: dict[str, Any] = {"text": "hello"}
+    client = httpx.Client(transport=httpx.MockTransport(handler))
+    try:
+        post_to_slack(payload, "https://hooks.slack.example/X/Y/Z", client=client)
+    finally:
+        client.close()
+
+    assert "unfurl_links" not in payload
+    assert "unfurl_media" not in payload
+
+
 def test_post_to_slack_raises_on_non_200() -> None:
     def handler(_req: httpx.Request) -> httpx.Response:
         return httpx.Response(400, text="invalid_payload")

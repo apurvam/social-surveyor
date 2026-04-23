@@ -636,7 +636,17 @@ def post_to_slack(
     ``client`` is injectable for tests using httpx's MockTransport.
     Default is a short-lived client per call; fine at digest cadence
     (once per project per day) plus occasional immediate alerts.
+
+    Link unfurling is force-disabled at post time (``unfurl_links`` and
+    ``unfurl_media`` set to False). Our digests and alerts already carry
+    titles, bodies, and IDs inline; Slack's preview cards duplicate that
+    content and balloon the message height — a Reddit post alone renders
+    a ~200px card under the digest footer. Setting both flags on every
+    payload keeps the builders pure (they don't need to know about
+    posting concerns) and covers callers that skip certain fields.
     """
+    payload = {**payload, "unfurl_links": False, "unfurl_media": False}
+
     owns_client = client is None
     if client is None:
         client = httpx.Client(timeout=timeout)
