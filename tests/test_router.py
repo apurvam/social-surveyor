@@ -248,6 +248,134 @@ def test_route_is_idempotent(tmp_path: Path) -> None:
     assert second == []
 
 
+def test_route_skips_duplicate_alert_on_reclassification(tmp_path: Path) -> None:
+    """A prompt_version bump re-classifies every item, which creates a
+    fresh `classifications` row with no alerts row yet — the old router
+    would then create a second alerts row and re-ship the item. Regression
+    guard: the router now dedupes on (item_id, channel), so a second
+    classification for the same item on the same channel is a no-op
+    write. The decision is still returned with ``skipped_duplicate=True``
+    so dry-run / logging remain honest.
+    """
+    with Storage(tmp_path / "t.db") as db:
+        # v1: classify, route. One digest alert row exists.
+        _seed_classified_item(
+            db, item_id="hackernews:1", category="off_topic", urgency=1
+        )
+        first = route_classifications(db, _cfg())
+        assert len(first) == 1
+        assert first[0].skipped_duplicate is False
+        row_count_after_first = db._conn.execute(
+            "SELECT COUNT(*) AS c FROM alerts WHERE item_id = ?",
+            ("hackernews:1",),
+        ).fetchone()["c"]
+        assert row_count_after_first == 1
+
+        # v2: re-classify the same item under a different prompt_version
+        # (simulates a prompt rev). save_classification is append-only so
+        # this is a fresh classifications row.
+        db.save_classification(
+            item_id="hackernews:1",
+            category="slatedb",
+            urgency=2,
+            reasoning="re-classified under new taxonomy",
+            prompt_version="v4",
+            model="haiku",
+            input_tokens=100,
+            output_tokens=50,
+            classified_at=datetime.now(UTC),
+            raw_response={},
+        )
+        second = route_classifications(db, _cfg())
+
+        # The new v4 classification is picked up as a decision (so
+        # dry-run logging is accurate), flagged as a duplicate, and
+        # does NOT produce a new alerts row.
+        final = db._conn.execute(
+            "SELECT COUNT(*) AS c FROM alerts WHERE item_id = ?",
+            ("hackernews:1",),
+        ).fetchone()["c"]
+
+    assert len(second) == 1
+    assert second[0].skipped_duplicate is True
+    assert second[0].channel == "digest"
+    assert final == 1
+
+
+def test_route_allows_new_channel_when_prior_alert_was_different_channel(
+    tmp_path: Path,
+) -> None:
+    """Dedupe is per-channel — a prior digest alert should NOT suppress a
+    fresh immediate alert when the re-classification bumps the item's
+    urgency/category above the immediate threshold. That's an escalation
+    the operator needs to see."""
+    with Storage(tmp_path / "t.db") as db:
+        # v1: low urgency off_topic → digest
+        _seed_classified_item(
+            db, item_id="hackernews:2", category="off_topic", urgency=1
+        )
+        first = route_classifications(db, _cfg())
+        assert first[0].channel == "digest"
+
+        # v2: re-classified as a cost_complaint at urgency 9 → immediate
+        db.save_classification(
+            item_id="hackernews:2",
+            category="cost_complaint",
+            urgency=9,
+            reasoning="actually cost complaint",
+            prompt_version="v4",
+            model="haiku",
+            input_tokens=100,
+            output_tokens=50,
+            classified_at=datetime.now(UTC),
+            raw_response={},
+        )
+        second = route_classifications(db, _cfg())
+        rows = db._conn.execute(
+            "SELECT channel FROM alerts WHERE item_id = ? ORDER BY id",
+            ("hackernews:2",),
+        ).fetchall()
+
+    assert len(second) == 1
+    assert second[0].channel == "immediate"
+    assert second[0].skipped_duplicate is False
+    # Two alerts now: the prior digest, plus a fresh immediate.
+    assert [r["channel"] for r in rows] == ["digest", "immediate"]
+
+
+def test_route_dry_run_reports_duplicate_without_writing(tmp_path: Path) -> None:
+    """Dry-run must still surface the duplicate-skip decision so the
+    operator can see what would (and wouldn't) fire, without mutating
+    the alerts table."""
+    with Storage(tmp_path / "t.db") as db:
+        _seed_classified_item(
+            db, item_id="hackernews:3", category="off_topic", urgency=1
+        )
+        route_classifications(db, _cfg())  # non-dry-run, creates alert
+        db.save_classification(
+            item_id="hackernews:3",
+            category="slatedb",
+            urgency=1,
+            reasoning="re-run",
+            prompt_version="v4",
+            model="haiku",
+            input_tokens=10,
+            output_tokens=5,
+            classified_at=datetime.now(UTC),
+            raw_response={},
+        )
+        decisions = route_classifications(db, _cfg(), dry_run=True)
+        alerts_count = db._conn.execute(
+            "SELECT COUNT(*) AS c FROM alerts WHERE item_id = ?",
+            ("hackernews:3",),
+        ).fetchone()["c"]
+
+    assert len(decisions) == 1
+    assert decisions[0].skipped_duplicate is True
+    # Dry-run + duplicate = no new row either way.
+    assert alerts_count == 1
+
+
 def test_route_old_item_routes_to_digest_and_logs_skip(
     tmp_path: Path,
     capsys: pytest.CaptureFixture[str],
