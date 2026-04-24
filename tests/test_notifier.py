@@ -471,6 +471,55 @@ def test_digest_item_title_is_hyperlinked_to_url() -> None:
     assert "*<https" not in text
 
 
+def test_digest_item_line_includes_absolute_timestamp_between_title_and_id() -> None:
+    """Each digest row renders as:
+    ``<emoji>  <title-link>  ·  <compact UTC timestamp>  ·  <item-id>``.
+
+    The timestamp is UTC, month-name-day-HH:MM with a trailing Z so an
+    operator can tell "2h ago" from "6 days ago" without opening the
+    link. Position matters: timestamp sits between the link and the id
+    so the id stays the rightmost copy target.
+    """
+    item = _item(
+        item_id="hackernews:42",
+        title="Datadog costs doubled",
+        url="https://news.ycombinator.com/item?id=42",
+        category="cost_complaint",
+        created_at=datetime(2026, 4, 24, 9, 5, tzinfo=UTC),
+    )
+    payload = build_digest(
+        [item],
+        DigestStats(day=date(2026, 4, 24), haiku_cost_usd=0, total_labeled=0),
+        _cfg(),
+    )
+    text = _all_text(payload["blocks"])
+    # Exact compact form, with the Z suffix.
+    assert "Apr 24 09:05Z" in text
+    # Appears between the link and the item-id on the same line.
+    title_end = text.index("Datadog costs doubled>") + len("Datadog costs doubled>")
+    ts_pos = text.index("Apr 24 09:05Z")
+    id_pos = text.index("`hackernews:42`")
+    assert title_end < ts_pos < id_pos
+    # And they're all on the same line (no newline between title and id).
+    between = text[title_end:id_pos]
+    assert "\n" not in between
+
+
+def test_digest_item_timestamp_renders_naive_datetime_as_utc() -> None:
+    """Defensive: if a NotifierItem ever arrives with a tz-naive
+    ``created_at`` (e.g. from a test fixture or legacy row that didn't
+    round-trip through _from_iso), the timestamp still renders — as UTC
+    — rather than raising.
+    """
+    item = _item(created_at=datetime(2026, 4, 24, 9, 5))  # no tzinfo
+    payload = build_digest(
+        [item],
+        DigestStats(day=date(2026, 4, 24), haiku_cost_usd=0, total_labeled=0),
+        _cfg(),
+    )
+    assert "Apr 24 09:05Z" in _all_text(payload["blocks"])
+
+
 def test_digest_item_without_url_falls_back_to_plain_title() -> None:
     """Items without a URL render as plain text — no stray link syntax
     and no bold wrapper that would lie about clickability."""
