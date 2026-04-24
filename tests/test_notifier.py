@@ -22,9 +22,34 @@ from social_surveyor.notifier import (
     post_to_slack,
 )
 
+# Canonical opendata taxonomy — used as the default for tests that
+# predated the move to project-driven ordering. New tests that care
+# about a specific taxonomy should pass `category_order` explicitly
+# via `_cfg(category_order=[...])`.
+_DEFAULT_TEST_CATEGORY_ORDER: list[str] = [
+    "cost_complaint",
+    "self_host_intent",
+    "competitor_pain",
+    "active_practitioner",
+    "neutral_discussion",
+    "tutorial_or_marketing",
+    "off_topic",
+]
 
-def _cfg(project: str = "opendata") -> NotifierConfig:
-    return NotifierConfig(project=project)
+
+def _cfg(
+    project: str = "opendata",
+    *,
+    category_order: list[str] | None = None,
+    category_labels: dict[str, str] | None = None,
+) -> NotifierConfig:
+    return NotifierConfig(
+        project=project,
+        category_labels=category_labels or {},
+        category_order=list(
+            category_order if category_order is not None else _DEFAULT_TEST_CATEGORY_ORDER
+        ),
+    )
 
 
 def _item(
@@ -700,8 +725,8 @@ def test_digest_total_blocks_stays_under_slack_limit_on_worst_case() -> None:
 
 
 def test_digest_dropped_categories_get_context_notice() -> None:
-    """When categories can't fit the budget, the trailing ones (lowest
-    priority in DIGEST_CATEGORY_ORDER) are dropped with a single notice."""
+    """When categories can't fit the budget, the trailing ones (last in
+    ``config.category_order``) are dropped with a single notice."""
     cats = [
         "cost_complaint",
         "self_host_intent",
@@ -750,43 +775,87 @@ def test_digest_light_day_no_budget_trim() -> None:
     assert len(payload["blocks"]) <= SLACK_MAX_BLOCKS
 
 
-def test_digest_renders_off_topic_after_fork_categories() -> None:
-    """Forks with custom taxonomies (e.g. opendata-brand's direct_question,
-    comparison, etc.) mix fork-defined ids with canonical off_topic.
-    off_topic must stay last across both sets, not land in the middle
-    of the fork's alphabetical fallback.
+def test_digest_renders_categories_in_project_declared_order() -> None:
+    """A fork's categories.yaml declaration order drives section order.
+    Whatever the project declared first renders first, regardless of
+    alphabet or how items arrived.
     """
+    # Fork taxonomy (opendata-brand shape): note off_topic is declared
+    # last, and the other categories are NOT in alphabetical order —
+    # this tests that the project's explicit ordering wins.
+    fork_order = [
+        "direct_question",
+        "issue_or_complaint",
+        "comparison",
+        "off_topic",
+    ]
     items = [
+        _item(item_id="x:1", category="off_topic", urgency=5, title="off-topic item"),
+        _item(item_id="x:2", category="comparison", urgency=5, title="comparison item"),
         _item(
-            item_id=f"x:{i}",
-            category=cat,
+            item_id="x:3",
+            category="direct_question",
             urgency=5,
-            title=f"{cat} item",
-        )
-        for i, cat in enumerate(("comparison", "direct_question", "off_topic"))
+            title="direct-question item",
+        ),
+        _item(
+            item_id="x:4",
+            category="issue_or_complaint",
+            urgency=5,
+            title="issue-or-complaint item",
+        ),
     ]
     payload = build_digest(
         items,
         DigestStats(day=date(2026, 4, 24), haiku_cost_usd=0.0, total_labeled=0),
-        _cfg(),
+        _cfg(category_order=fork_order),
     )
     text = _all_text(payload["blocks"])
-    # Fork categories render first (alphabetical: comparison, direct_question),
-    # then off_topic at the tail — never in the middle.
-    comp = text.index("comparison item")
-    dq = text.index("direct_question item")
-    ot = text.index("off_topic item")
-    assert comp < dq < ot
+    positions = [text.index(f"{label} item") for label in fork_order_labels(fork_order)]
+    assert positions == sorted(positions)
 
 
-def test_digest_drops_off_topic_first_when_over_budget() -> None:
-    """When categories don't all fit in SLACK_MAX_BLOCKS, off_topic is
-    sacrificed before any real category. False-positive items shouldn't
-    crowd out actual signal.
+def fork_order_labels(order: list[str]) -> list[str]:
+    # Titles use hyphenated forms; map ids to matching search terms.
+    mapping = {
+        "direct_question": "direct-question",
+        "issue_or_complaint": "issue-or-complaint",
+        "comparison": "comparison",
+        "off_topic": "off-topic",
+    }
+    return [mapping[c] for c in order]
+
+
+def test_digest_renders_undeclared_categories_alphabetically_at_tail() -> None:
+    """If the classifier produces a category the project didn't declare
+    (post-rename drift, typo), it still renders — at the tail, in
+    alphabetical order — so no signal is silently dropped.
     """
-    # Seven real categories plus off_topic, each with enough items to
-    # push total blocks past the budget.
-    real_cats = [
+    declared = ["cost_complaint"]
+    items = [
+        _item(item_id="hackernews:1", category="cost_complaint", urgency=8, title="declared item"),
+        _item(item_id="hackernews:2", category="zeta_leftover", urgency=5, title="zeta item"),
+        _item(item_id="hackernews:3", category="alpha_drift", urgency=5, title="alpha item"),
+    ]
+    payload = build_digest(
+        items,
+        DigestStats(day=date(2026, 4, 24), haiku_cost_usd=0.0, total_labeled=0),
+        _cfg(category_order=declared),
+    )
+    text = _all_text(payload["blocks"])
+    declared_pos = text.index("declared item")
+    alpha_pos = text.index("alpha item")
+    zeta_pos = text.index("zeta item")
+    assert declared_pos < alpha_pos < zeta_pos
+
+
+def test_digest_drops_last_category_first_when_over_budget() -> None:
+    """Over-budget trimming drops from the tail of ``category_order``.
+    Operators who want a specific category sacrificed first (e.g. a
+    false-positive bucket like off_topic) declare it last in
+    categories.yaml — no hard-coded special case.
+    """
+    order = [
         "cost_complaint",
         "self_host_intent",
         "competitor_pain",
@@ -794,9 +863,10 @@ def test_digest_drops_off_topic_first_when_over_budget() -> None:
         "neutral_discussion",
         "tutorial_or_marketing",
         "migration_friction",
+        "off_topic",
     ]
     items: list[NotifierItem] = []
-    for c in [*real_cats, "off_topic"]:
+    for c in order:
         for i in range(6):
             items.append(
                 _item(
@@ -809,16 +879,54 @@ def test_digest_drops_off_topic_first_when_over_budget() -> None:
     payload = build_digest(
         items,
         DigestStats(day=date(2026, 4, 24), haiku_cost_usd=0.0, total_labeled=0),
-        _cfg(),
+        _cfg(category_order=order),
     )
     text = _all_text(payload["blocks"])
-    # off_topic is dropped; the "not shown" notice names it.
     assert "categories not shown" in text
-    assert "off_topic" in text  # referenced in the dropped-notice
-    # But no off_topic section body was rendered — the per-item titles
-    # for off_topic should not appear anywhere.
+    assert "off_topic" in text  # named in the dropped notice
+    # No off_topic body rendered.
     for i in range(6):
         assert f"off_topic item {i}" not in text
+
+
+def test_digest_fork_tail_drops_first_when_over_budget() -> None:
+    """Tail-drop is fork-aware: the category a fork declared last is
+    the one dropped, even if it isn't ``off_topic``. Proves the drop
+    behavior follows project order rather than any built-in list.
+    """
+    # Fork taxonomy where "neutral_mention" is declared last. Enough
+    # items per category to force the budget to overflow.
+    order = [
+        "direct_question",
+        "issue_or_complaint",
+        "comparison",
+        "positive_mention",
+        "ecosystem_discussion",
+        "off_topic",
+        "neutral_mention",
+    ]
+    items: list[NotifierItem] = []
+    for c in order:
+        for i in range(6):
+            items.append(
+                _item(
+                    item_id=f"reddit:{c}-{i}",
+                    category=c,
+                    urgency=5,
+                    title=f"{c} item {i}",
+                )
+            )
+    payload = build_digest(
+        items,
+        DigestStats(day=date(2026, 4, 24), haiku_cost_usd=0.0, total_labeled=0),
+        _cfg(category_order=order),
+    )
+    text = _all_text(payload["blocks"])
+    assert "categories not shown" in text
+    # neutral_mention was last in the fork's declared order → it's the
+    # first to be sacrificed, even though off_topic exists earlier.
+    for i in range(6):
+        assert f"neutral_mention item {i}" not in text
 
 
 def test_digest_keeps_off_topic_when_budget_comfortable() -> None:
