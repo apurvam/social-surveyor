@@ -300,8 +300,16 @@ PY
 REMOTE_BODY=$(cat <<REMOTE
 set -euo pipefail
 test -f '${REMOTE_DB}' || { echo "not found: ${REMOTE_DB}" >&2; exit 2; }
-curl --fail --silent --show-error --upload-file '${REMOTE_DB}' '${PRESIGNED_URL}'
-echo "uploaded: ${REMOTE_DB}"
+SIZE=\$(wc -c < '${REMOTE_DB}' | tr -d ' ')
+# -L follows redirects (S3 can 307 between global/regional endpoints);
+# --fail turns HTTP >=400 into a non-zero curl exit; --write-out prints
+# the upload byte count + HTTP status so we can confirm a real PUT
+# happened and didn't silently become a 0-byte body.
+HTTP_RESULT=\$(curl --fail --silent --show-error --location \\
+    --upload-file '${REMOTE_DB}' '${PRESIGNED_URL}' \\
+    --write-out 'HTTP %{http_code} uploaded %{size_upload}/%{response_code}' || echo 'curl exit non-zero')
+echo "source: ${REMOTE_DB} (\${SIZE} bytes)"
+echo "result: \${HTTP_RESULT}"
 REMOTE
 )
 REMOTE_BODY_B64=$(printf '%s' "$REMOTE_BODY" | base64 | tr -d '\n')
@@ -351,16 +359,33 @@ if [ "$STATUS" != "Success" ]; then
     die "remote upload failed (status=$STATUS): ${STDERR:-<no stderr>}"
 fi
 
+# Show what the instance reported on its end — "uploaded: <path>"
+# if all went well, or any stdout from the curl step otherwise.
+SSM_STDOUT=$(echo "$INVOCATION" \
+    | python3 -c "import json,sys; print(json.load(sys.stdin).get('StandardOutputContent',''))")
+if [ -n "$SSM_STDOUT" ]; then
+    echo "    remote: $SSM_STDOUT"
+fi
+
 # --- pull + cleanup ---
+# Not using --quiet on cp: on some CLI versions --quiet swallows error
+# output on failure as well as progress on success, which masks the
+# case where the staged object is missing (e.g. the remote curl
+# succeeded with a 0-byte PUT, or the presigned URL TTL expired).
 mkdir -p "$LOCAL_DATA_DIR"
 echo "==> aws s3 cp s3://$BUCKET/$S3_KEY $LOCAL_DB"
-aws s3 cp "s3://$BUCKET/$S3_KEY" "$LOCAL_DB" --region "$REGION" --quiet
+aws s3 cp "s3://$BUCKET/$S3_KEY" "$LOCAL_DB" --region "$REGION"
 
-echo "==> aws s3 rm s3://$BUCKET/$S3_KEY"
-aws s3 rm "s3://$BUCKET/$S3_KEY" --region "$REGION" --quiet || true
-
+# Explicitly check the local copy rather than trusting cp's exit code —
+# on some CLI versions a partial or empty transfer exits 0.
+if [ ! -s "$LOCAL_DB" ]; then
+    die "local DB $LOCAL_DB is missing or empty after s3 cp — the SSM-side curl may have succeeded with a 0-byte body. Re-run; if it reproduces, check journalctl on the instance for the SSM command body."
+fi
 DB_SIZE=$(wc -c < "$LOCAL_DB" | tr -d ' ')
 echo "    local DB size: ${DB_SIZE} bytes"
+
+echo "==> aws s3 rm s3://$BUCKET/$S3_KEY"
+aws s3 rm "s3://$BUCKET/$S3_KEY" --region "$REGION" || true
 
 # --- snapshot labels file for change detection ---
 LABELS_PRE_SHA=""
