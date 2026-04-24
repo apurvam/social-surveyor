@@ -42,6 +42,12 @@ class RoutingDecision:
     urgency: int
     channel: str  # 'immediate' or 'digest'
     silenced: bool
+    # True when the item already has an alert on ``channel`` from a prior
+    # classification — the router logs and skips the record_alert call
+    # instead of creating a duplicate. Typical trigger: a prompt_version
+    # bump re-classifies everything, which otherwise would re-deliver the
+    # entire corpus to Slack.
+    skipped_duplicate: bool = False
 
 
 def decide(
@@ -114,6 +120,12 @@ def route_classifications(
             item_created_at=item_created_at,
             now=effective_now,
         )
+        # Dedupe across prompt_version bumps (and any other source of
+        # re-classification): if the item was already routed to this
+        # channel, don't create a second alerts row. The new
+        # classification still lives in the DB for audit/eval; we just
+        # don't re-notify Slack.
+        skipped_duplicate = db.has_alert_on_channel(item_id, channel)
         d = RoutingDecision(
             item_id=item_id,
             classification_id=int(row["id"]),
@@ -121,13 +133,23 @@ def route_classifications(
             urgency=urgency,
             channel=channel,
             silenced=silenced,
+            skipped_duplicate=skipped_duplicate,
         )
         decisions.append(d)
-        if not dry_run:
+        if not dry_run and not skipped_duplicate:
             db.record_alert(
                 item_id=item_id,
                 classification_id=int(row["id"]),
                 channel=channel,
+            )
+        if skipped_duplicate:
+            log.info(
+                "router.skipped_duplicate_alert",
+                item_id=item_id,
+                category=category,
+                urgency=urgency,
+                channel=channel,
+                classification_id=int(row["id"]),
             )
         # Surface the age-skip path explicitly so an operator watching
         # journald can confirm the cutoff is working.

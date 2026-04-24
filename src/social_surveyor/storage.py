@@ -646,6 +646,22 @@ class Storage:
             )
         return int(cur.lastrowid or 0)
 
+    def has_alert_on_channel(self, item_id: str, channel: str) -> bool:
+        """True when ``item_id`` already has an ``alerts`` row on ``channel``.
+
+        Used by :func:`router.route_classifications` to suppress re-alerts
+        when a re-classification (typically a ``prompt_version`` bump)
+        produces a fresh classifications row for an item that was
+        already delivered. The scope is per-channel on purpose — a
+        prior digest entry should not block a freshly-urgent immediate
+        alert, but a second digest for the same item is noise.
+        """
+        row = self._conn.execute(
+            "SELECT 1 FROM alerts WHERE item_id = ? AND channel = ? LIMIT 1",
+            (item_id, channel),
+        ).fetchone()
+        return row is not None
+
     def mark_alert_sent(self, alert_id: int, sent_at: datetime) -> None:
         with self._conn:
             self._conn.execute(
