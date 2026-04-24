@@ -69,6 +69,21 @@ categories:
       thesis; these discussions shape the market. Lower urgency than
       direct mentions.
 
+  - id: slatedb
+    label: "SlateDB-specific discussion"
+    description: >
+      Post is clearly about SlateDB (our shared LSM storage layer —
+      slatedb.io, github.com/slatedb/slatedb) but doesn't fit the
+      higher-intent categories above. Examples: someone linking to a
+      SlateDB commit or blog post, dev-side chatter about the LSM,
+      generic "saw SlateDB in someone's stack" mentions, low-stakes
+      curiosity. Questions about SlateDB still belong in
+      direct_question; concrete issues in issue_or_complaint;
+      comparisons in comparison; explicit praise in positive_mention.
+      This bucket is the catch-all for "clearly SlateDB, no other
+      intent fits" — distinct from off_topic, which is false-positive
+      keyword matches.
+
   - id: off_topic
     label: "Off topic (false positive)"
     description: >

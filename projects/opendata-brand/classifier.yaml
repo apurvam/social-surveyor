@@ -2,7 +2,7 @@
 # See projects/example/classifier.yaml for field-by-field documentation.
 
 version: 1
-prompt_version: "v1"
+prompt_version: "v2"
 
 categories_file: "categories.yaml"
 
@@ -124,10 +124,25 @@ additional_instructions: |
      - "The future of Kafka is object storage"
      OpenData's positioning IS this thesis — worth tracking.
 
-  4. Precedence when torn:
+  4. If the post is clearly about SlateDB (slatedb.io, slatedb/slatedb
+     on GitHub, or unambiguously naming our LSM foundation) but none
+     of direct_question / issue_or_complaint / comparison /
+     positive_mention / neutral_mention fit the author's intent, use
+     `slatedb`. This is NOT a fallback for SlateDB-related posts with
+     a clearer intent — route those to the intent category.
+     Examples that belong in slatedb:
+     - "Saw a commit land in slatedb for async compaction"
+     - "Anyone else been playing with slatedb lately?"
+     - "SlateDB's design doc is an interesting read"
+     `slatedb` is distinct from off_topic: off_topic is for
+     false-positive keyword matches (the post isn't about us at all);
+     slatedb is for real SlateDB discussion that just doesn't slot
+     into a higher-intent bucket.
+
+  5. Precedence when torn:
      direct_question > issue_or_complaint > comparison >
      positive_mention > neutral_mention > ecosystem_discussion >
-     off_topic
+     slatedb > off_topic
 
   Urgency guidance (independent of category):
   - 9-10: direct question from a potential adopter where a quick
