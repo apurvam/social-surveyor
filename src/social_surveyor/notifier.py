@@ -438,10 +438,11 @@ def _build_category_group(
 def _digest_item_block(item: NotifierItem, config: NotifierConfig) -> dict[str, Any]:
     """One item inside a category section.
 
-    Top line: source emoji, linked title, trailing monospace item-id.
-    When the item has a body (HN comment, Reddit self-post, HN story
-    with self-text), a second italic line carries a 200-char preview
-    so you can decide whether to click without opening the item.
+    Top line: source emoji, linked title, compact absolute timestamp,
+    trailing monospace item-id. When the item has a body (HN comment,
+    Reddit self-post, HN story with self-text), a second italic line
+    carries a 200-char preview so you can decide whether to click
+    without opening the item.
 
     No author, no flag prefix on the id — the id is the one piece of
     tooling metadata you'd copy, and Slack's code styling is enough to
@@ -455,13 +456,31 @@ def _digest_item_block(item: NotifierItem, config: NotifierConfig) -> dict[str, 
     title = _truncate(item.title or "(no title)", _title_max(item.source))
     first_line = (
         f"{silenced_prefix}{_source_label(item.source)}  "
-        f"{_linked_title(title, item.url)}  ·  `{item.item_id}`"
+        f"{_linked_title(title, item.url)}  ·  "
+        f"{_digest_absolute_time(item.created_at)}  ·  `{item.item_id}`"
     )
     lines = [first_line]
     preview = _body_preview(item)
     if preview is not None:
         lines.append(f"_{preview}_")
     return {"type": "section", "text": {"type": "mrkdwn", "text": "\n".join(lines)}}
+
+
+def _digest_absolute_time(moment: datetime) -> str:
+    """Short UTC timestamp for digest rows, e.g. ``"Apr 24 09:00Z"``.
+
+    Items can be up to ``digest.max_item_age_hours`` old (7 days by
+    default), so the month + day disambiguates yesterday-vs-last-week
+    at a glance. The ``Z`` suffix pins the timezone — the digest
+    process runs in UTC regardless of the project's schedule tz.
+    """
+    if moment.tzinfo is None:
+        moment = moment.replace(tzinfo=UTC)
+    utc = moment.astimezone(UTC)
+    # %b is locale-dependent; in CI/prod both run under C.UTF-8 so this
+    # renders "Apr" consistently. If we ever ship a non-English locale,
+    # swap to the numeric form.
+    return utc.strftime("%b %d %H:%MZ")
 
 
 def _body_preview(item: NotifierItem) -> str | None:
