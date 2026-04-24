@@ -264,6 +264,16 @@ class DigestConfig(BaseModel):
         ge=1,
         description="Window of classifications to include in the daily digest.",
     )
+    max_item_age_hours: int = Field(
+        default=168,
+        ge=1,
+        description=(
+            "Exclude items whose created_at is older than this from the digest. "
+            "Prevents a fresh bootstrap (where the first poll can pull years-old "
+            "Algolia hits for low-volume queries) from surfacing stale posts that "
+            "are past any useful engagement window. Set to a large value to disable."
+        ),
+    )
 
 
 class CostCapsConfig(BaseModel):

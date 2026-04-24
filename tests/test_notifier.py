@@ -750,6 +750,98 @@ def test_digest_light_day_no_budget_trim() -> None:
     assert len(payload["blocks"]) <= SLACK_MAX_BLOCKS
 
 
+def test_digest_renders_off_topic_after_fork_categories() -> None:
+    """Forks with custom taxonomies (e.g. opendata-brand's direct_question,
+    comparison, etc.) mix fork-defined ids with canonical off_topic.
+    off_topic must stay last across both sets, not land in the middle
+    of the fork's alphabetical fallback.
+    """
+    items = [
+        _item(
+            item_id=f"x:{i}",
+            category=cat,
+            urgency=5,
+            title=f"{cat} item",
+        )
+        for i, cat in enumerate(("comparison", "direct_question", "off_topic"))
+    ]
+    payload = build_digest(
+        items,
+        DigestStats(day=date(2026, 4, 24), haiku_cost_usd=0.0, total_labeled=0),
+        _cfg(),
+    )
+    text = _all_text(payload["blocks"])
+    # Fork categories render first (alphabetical: comparison, direct_question),
+    # then off_topic at the tail — never in the middle.
+    comp = text.index("comparison item")
+    dq = text.index("direct_question item")
+    ot = text.index("off_topic item")
+    assert comp < dq < ot
+
+
+def test_digest_drops_off_topic_first_when_over_budget() -> None:
+    """When categories don't all fit in SLACK_MAX_BLOCKS, off_topic is
+    sacrificed before any real category. False-positive items shouldn't
+    crowd out actual signal.
+    """
+    # Seven real categories plus off_topic, each with enough items to
+    # push total blocks past the budget.
+    real_cats = [
+        "cost_complaint",
+        "self_host_intent",
+        "competitor_pain",
+        "active_practitioner",
+        "neutral_discussion",
+        "tutorial_or_marketing",
+        "migration_friction",
+    ]
+    items: list[NotifierItem] = []
+    for c in [*real_cats, "off_topic"]:
+        for i in range(6):
+            items.append(
+                _item(
+                    item_id=f"hackernews:{c}-{i}",
+                    category=c,
+                    urgency=5,
+                    title=f"{c} item {i}",
+                )
+            )
+    payload = build_digest(
+        items,
+        DigestStats(day=date(2026, 4, 24), haiku_cost_usd=0.0, total_labeled=0),
+        _cfg(),
+    )
+    text = _all_text(payload["blocks"])
+    # off_topic is dropped; the "not shown" notice names it.
+    assert "categories not shown" in text
+    assert "off_topic" in text  # referenced in the dropped-notice
+    # But no off_topic section body was rendered — the per-item titles
+    # for off_topic should not appear anywhere.
+    for i in range(6):
+        assert f"off_topic item {i}" not in text
+
+
+def test_digest_keeps_off_topic_when_budget_comfortable() -> None:
+    """With plenty of room, off_topic still renders (at the tail)."""
+    items = [
+        _item(item_id="hackernews:1", category="cost_complaint", urgency=7),
+        _item(
+            item_id="hackernews:2",
+            category="off_topic",
+            urgency=0,
+            title="benign off topic",
+        ),
+    ]
+    payload = build_digest(
+        items,
+        DigestStats(day=date(2026, 4, 24), haiku_cost_usd=0.0, total_labeled=0),
+        _cfg(),
+    )
+    text = _all_text(payload["blocks"])
+    assert "benign off topic" in text
+    assert "categories not shown" not in text
+
+
 # --- post_to_slack -----------------------------------------------------------
 
 

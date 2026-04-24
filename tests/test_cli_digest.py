@@ -49,6 +49,7 @@ def _seed_item_and_classification(
     category: str,
     urgency: int,
     title: str = "t",
+    item_created_at: datetime | None = None,
 ) -> None:
     source, platform_id = item_id.split(":", 1)
     db.upsert_item(
@@ -59,7 +60,9 @@ def _seed_item_and_classification(
             title=title,
             body="body",
             author="alice",
-            created_at=datetime.now(UTC) - timedelta(minutes=30),
+            created_at=item_created_at
+            if item_created_at is not None
+            else datetime.now(UTC) - timedelta(minutes=30),
             raw_json={"id": platform_id},
         )
     )
@@ -350,6 +353,137 @@ def test_digest_since_filter_is_parsed(tmp_path: Path) -> None:
         echo_fn=lambda _m="": None,
     )
     assert narrow["items"] == 0
+
+
+def test_digest_excludes_items_older_than_max_item_age_hours(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """On a fresh bootstrap, a narrow phrase-match query can return
+    years-old items from HN/Algolia. Even though those items get queued
+    'today' in the alerts table, their created_at is ancient — surfacing
+    them in the first digest is pure noise. Any item older than
+    ``digest.max_item_age_hours`` is dropped from the rendered digest.
+    """
+    projects_root = _write_project_configs(tmp_path)
+    _add_routing_yaml(projects_root)
+    db_path = tmp_path / "data" / "demo.db"
+    monkeypatch.setenv("TEST_DEMO_IMMEDIATE_WEBHOOK", "https://hooks.example/immediate")
+
+    with Storage(db_path) as db:
+        _seed_item_and_classification(
+            db,
+            item_id="hackernews:fresh",
+            category="off_topic",
+            urgency=1,
+            title="fresh item",
+            item_created_at=datetime.now(UTC) - timedelta(hours=6),
+        )
+        _seed_item_and_classification(
+            db,
+            item_id="hackernews:stale",
+            category="off_topic",
+            urgency=1,
+            title="stale item",
+            item_created_at=datetime.now(UTC) - timedelta(days=400),
+        )
+
+    run_route(
+        "demo",
+        db_path,
+        projects_root,
+        dry_run=False,
+        http_client=httpx.Client(
+            transport=httpx.MockTransport(lambda _r: httpx.Response(200, text="ok"))
+        ),
+        echo_fn=lambda _m="": None,
+    )
+
+    echoed: list[str] = []
+    result = run_digest(
+        "demo",
+        db_path,
+        projects_root,
+        dry_run=True,
+        echo_fn=echoed.append,
+    )
+    # Default max_item_age_hours is 168 (7 days); the 400-day-old item
+    # is filtered out, the 6-hour-old one renders.
+    assert result["items"] == 1
+    payload_text = "\n".join(echoed)
+    assert "fresh item" in payload_text
+    assert "stale item" not in payload_text
+
+
+def test_digest_respects_configured_max_item_age_hours(tmp_path: Path) -> None:
+    """A project with a shorter max_item_age_hours excludes items older
+    than the configured window even if they'd pass the default.
+    """
+    projects_root = _write_project_configs(tmp_path)
+    # Custom routing with a 12-hour item-age cutoff.
+    (projects_root / "demo" / "routing.yaml").write_text(
+        """
+version: 1
+immediate:
+  threshold_urgency: 7
+  alert_worthy_categories:
+    - cost_complaint
+  webhook_secret: TEST_DEMO_IMMEDIATE_WEBHOOK
+digest:
+  schedule:
+    hour: 9
+    minute: 0
+    timezone: UTC
+  webhook_secret: TEST_DEMO_DIGEST_WEBHOOK
+  window_hours: 24
+  max_item_age_hours: 12
+cost_caps:
+  daily_haiku_tokens: 500000
+""",
+        encoding="utf-8",
+    )
+    db_path = tmp_path / "data" / "demo.db"
+
+    with Storage(db_path) as db:
+        _seed_item_and_classification(
+            db,
+            item_id="hackernews:recent",
+            category="off_topic",
+            urgency=1,
+            title="recent item",
+            item_created_at=datetime.now(UTC) - timedelta(hours=6),
+        )
+        _seed_item_and_classification(
+            db,
+            item_id="hackernews:day-old",
+            category="off_topic",
+            urgency=1,
+            title="day-old item",
+            item_created_at=datetime.now(UTC) - timedelta(hours=20),
+        )
+
+    run_route(
+        "demo",
+        db_path,
+        projects_root,
+        dry_run=False,
+        http_client=httpx.Client(
+            transport=httpx.MockTransport(lambda _r: httpx.Response(200, text="ok"))
+        ),
+        echo_fn=lambda _m="": None,
+    )
+
+    echoed: list[str] = []
+    result = run_digest(
+        "demo",
+        db_path,
+        projects_root,
+        dry_run=True,
+        echo_fn=echoed.append,
+    )
+    assert result["items"] == 1
+    payload_text = "\n".join(echoed)
+    assert "recent item" in payload_text
+    assert "day-old item" not in payload_text
 
 
 def test_digest_does_not_re_include_items_from_previous_cycle(
