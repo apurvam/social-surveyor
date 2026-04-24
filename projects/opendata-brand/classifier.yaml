@@ -141,8 +141,12 @@ additional_instructions: |
 
   5. Precedence when torn:
      direct_question > issue_or_complaint > comparison >
-     positive_mention > neutral_mention > ecosystem_discussion >
-     slatedb > off_topic
+     positive_mention > neutral_mention > slatedb >
+     ecosystem_discussion > off_topic
+
+     Rationale: a SlateDB-slanted conversation is higher-signal for
+     us than generic object-store-native chatter, so `slatedb` wins
+     ties against `ecosystem_discussion`.
 
   Urgency guidance (independent of category):
   - 9-10: direct question from a potential adopter where a quick
