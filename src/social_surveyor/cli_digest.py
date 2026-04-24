@@ -91,6 +91,7 @@ def run_digest(
         project=project,
         category_labels=category_labels,
         category_order=category_order,
+        display_name=routing_cfg.digest.display_name,
     )
 
     with Storage(db_path) as db:

@@ -20,6 +20,7 @@ immediate:
   webhook_secret: OPENDATA_SLACK_WEBHOOK_IMMEDIATE
 
 digest:
+  display_name: "Observability chatter"
   schedule:
     hour: 9
     minute: 0

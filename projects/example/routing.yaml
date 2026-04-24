@@ -27,6 +27,11 @@ immediate:
   webhook_secret: EXAMPLE_SLACK_WEBHOOK_IMMEDIATE
 
 digest:
+  # Optional human-friendly label for the digest header in Slack. When
+  # set, it replaces the project directory name ("example" here) in
+  # the top "📊 Digest for ..." line. Useful when you want the
+  # on-disk name short but the Slack-facing name to read like a topic.
+  # display_name: "Observability chatter"
   schedule:
     hour: 9
     minute: 0

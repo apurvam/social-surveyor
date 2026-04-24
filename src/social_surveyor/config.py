@@ -274,6 +274,17 @@ class DigestConfig(BaseModel):
             "are past any useful engagement window. Set to a large value to disable."
         ),
     )
+    display_name: str | None = Field(
+        default=None,
+        min_length=1,
+        description=(
+            "Human-friendly label shown in the digest header in place of the "
+            "project directory name. Useful when the on-disk name is a short "
+            "identifier ('opendata-brand') but the Slack-facing name should be "
+            "something operator-readable ('OpenData chatter'). Unset = fall "
+            "back to the project directory name."
+        ),
+    )
 
 
 class CostCapsConfig(BaseModel):
