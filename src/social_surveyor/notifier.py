@@ -131,15 +131,25 @@ class NotifierConfig:
     An empty list falls back to alphabetical ordering; that's only
     exercised by unit tests of the pure builders that skip the
     project-config load.
+
+    ``display_name`` is the human-friendly label used in the digest
+    header in place of the project directory name. When unset the
+    header falls back to ``project``.
     """
 
     project: str
     category_labels: dict[str, str] = field(default_factory=dict)
     category_order: list[str] = field(default_factory=list)
+    display_name: str | None = None
 
     def category_display(self, category_id: str) -> str:
         """Return the human-friendly label for ``category_id``, or the id itself."""
         return self.category_labels.get(category_id, category_id)
+
+    def project_display(self) -> str:
+        """Return the Slack-facing project label — ``display_name`` if set,
+        otherwise the canonical project directory name."""
+        return self.display_name or self.project
 
 
 @dataclass(frozen=True)
@@ -325,14 +335,14 @@ def build_digest(
     # now, sourced from authoritative endpoints where available.
     if not items:
         top_header_text = (
-            f"📊 Digest for {config.project} · {stats.day.isoformat()} "
+            f"📊 Digest for {config.project_display()} · {stats.day.isoformat()} "
             f"— no new items in the last 24h"
         )
     else:
         items_noun = "item" if len(items) == 1 else "items"
         cats_noun = "category" if len(ordered_categories) == 1 else "categories"
         top_header_text = (
-            f"📊 Digest for {config.project} · {stats.day.isoformat()} · "
+            f"📊 Digest for {config.project_display()} · {stats.day.isoformat()} · "
             f"{len(items)} {items_noun} · {len(ordered_categories)} {cats_noun}"
         )
     blocks.append(_header_block(top_header_text))

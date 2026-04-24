@@ -42,6 +42,7 @@ def _cfg(
     *,
     category_order: list[str] | None = None,
     category_labels: dict[str, str] | None = None,
+    display_name: str | None = None,
 ) -> NotifierConfig:
     return NotifierConfig(
         project=project,
@@ -49,6 +50,7 @@ def _cfg(
         category_order=list(
             category_order if category_order is not None else _DEFAULT_TEST_CATEGORY_ORDER
         ),
+        display_name=display_name,
     )
 
 
@@ -198,6 +200,51 @@ def test_digest_header_includes_project_name() -> None:
     )
     headers = [b["text"]["text"] for b in payload["blocks"] if b.get("type") == "header"]
     assert "Digest for opendata-brand · 2026-04-19" in headers[0]
+
+
+def test_digest_header_uses_display_name_when_set() -> None:
+    """When the project sets ``digest.display_name`` in routing.yaml,
+    the Slack header shows that label instead of the on-disk project
+    id — so "opendata-brand" reads as "OpenData chatter" in Slack.
+    """
+    items = [_item(item_id="hackernews:1", category="cost_complaint", urgency=7)]
+    payload = build_digest(
+        items,
+        DigestStats(day=date(2026, 4, 19), haiku_cost_usd=0.12, total_labeled=0),
+        _cfg(project="opendata-brand", display_name="OpenData chatter"),
+    )
+    headers = [b["text"]["text"] for b in payload["blocks"] if b.get("type") == "header"]
+    assert "Digest for OpenData chatter · 2026-04-19" in headers[0]
+    # The on-disk id should not leak into the header when display_name is set.
+    assert "opendata-brand" not in headers[0]
+
+
+def test_digest_header_falls_back_to_project_when_display_name_unset() -> None:
+    """Unset display_name → header shows the project directory name,
+    preserving the pre-feature behavior and keeping a migration-free
+    default for projects that haven't opted in."""
+    items = [_item(item_id="hackernews:1", category="cost_complaint", urgency=7)]
+    payload = build_digest(
+        items,
+        DigestStats(day=date(2026, 4, 19), haiku_cost_usd=0.12, total_labeled=0),
+        _cfg(project="opendata", display_name=None),
+    )
+    headers = [b["text"]["text"] for b in payload["blocks"] if b.get("type") == "header"]
+    assert "Digest for opendata · 2026-04-19" in headers[0]
+
+
+def test_digest_empty_day_header_also_uses_display_name() -> None:
+    """The "no new items" variant of the header must honor display_name
+    too — otherwise on a quiet day the header would revert to the
+    on-disk id."""
+    payload = build_digest(
+        [],
+        DigestStats(day=date(2026, 4, 24), haiku_cost_usd=0.0, total_labeled=0),
+        _cfg(project="opendata-brand", display_name="OpenData chatter"),
+    )
+    text = _all_text(payload["blocks"])
+    assert "Digest for OpenData chatter · 2026-04-24" in text
+    assert "opendata-brand" not in text
 
 
 def test_digest_renders_categories_in_fixed_order() -> None:
