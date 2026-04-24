@@ -48,9 +48,11 @@ import httpx
 
 # Left-edge color bar for immediate alerts (Slack attachment `color`).
 # Hex picks track a tab10-ish palette so color meaning is stable across
-# pasted screenshots / docs. active_practitioner listed for completeness —
-# it's non-alert-worthy and should never fire an alert, but the builder
-# handles it defensively rather than raising mid-loop.
+# pasted screenshots / docs. This is keyed by the opendata project's
+# taxonomy; fork projects with different category ids fall through to
+# `_FALLBACK_COLOR` (gray) until a per-project color config is added.
+# Digest ordering, by contrast, is fully project-driven — see
+# `NotifierConfig.category_order` below.
 CATEGORY_COLORS: dict[str, str] = {
     "cost_complaint": "#d62728",
     "self_host_intent": "#1f77b4",
@@ -60,26 +62,6 @@ CATEGORY_COLORS: dict[str, str] = {
     "tutorial_or_marketing": "#9467bd",
     "off_topic": "#8c564b",
 }
-
-# Section order in the digest. Fixed so day-to-day scannability doesn't
-# depend on which categories happened to fire that day. Alert-worthy
-# first, then the relationship-building bucket, then context.
-DIGEST_CATEGORY_ORDER: tuple[str, ...] = (
-    "cost_complaint",
-    "self_host_intent",
-    "competitor_pain",
-    "active_practitioner",
-    "neutral_discussion",
-    "tutorial_or_marketing",
-    "off_topic",
-)
-
-# Canonical id for the classifier's "keyword matched but not actually
-# relevant" bucket. Pinned last in every rendered digest (after both
-# canonical and fork-defined categories) and dropped first when the
-# SLACK_MAX_BLOCKS budget forces trimming: off-topic items are
-# definitionally false positives and shouldn't crowd out real signal.
-OFF_TOPIC_CATEGORY = "off_topic"
 
 # Per-category item cap in the main digest message. Overflow gets a
 # single hint line pointing at the CLI inspection command.
@@ -140,10 +122,20 @@ class NotifierConfig:
     friendly labels from ``categories.yaml``. Used in section headers
     and alert headers so the digest reads in prose rather than in
     snake_case ids.
+
+    ``category_order`` is the project's declaration order from
+    ``categories.yaml`` (highest priority first). The digest renders
+    categories in this order and, when the Block Kit budget overflows,
+    drops from the tail first — so whichever category the project
+    declared last is the one sacrificed to keep real signal visible.
+    An empty list falls back to alphabetical ordering; that's only
+    exercised by unit tests of the pure builders that skip the
+    project-config load.
     """
 
     project: str
     category_labels: dict[str, str] = field(default_factory=dict)
+    category_order: list[str] = field(default_factory=list)
 
     def category_display(self, category_id: str) -> str:
         """Return the human-friendly label for ``category_id``, or the id itself."""
@@ -287,11 +279,19 @@ def build_digest(
     Structure:
 
     1. Header line with day, counts, and cost
-    2. One section per category in :data:`DIGEST_CATEGORY_ORDER`,
-       skipping empty categories. Each section shows the top 5 items
-       by urgency (then recency), with an overflow hint if the
-       category has more than 5.
+    2. One section per category in ``config.category_order`` (the
+       project's declaration order from ``categories.yaml``), skipping
+       empty categories. Each section shows the top 5 items by urgency
+       (then recency), with an overflow hint if the category has more
+       than 5.
     3. Cost/accuracy footer
+
+    Order is entirely project-driven: whichever order the project
+    declares its categories in ``categories.yaml`` is the order they
+    render, top to bottom. When the Block Kit budget overflows,
+    categories are dropped from the tail first — so operators who want
+    a false-positive bucket like ``off_topic`` sacrificed before any
+    real category simply declare it last.
 
     Items routed to the immediate channel do not appear here — they
     landed in the immediate Slack channel and are considered consumed.
@@ -299,24 +299,17 @@ def build_digest(
     :func:`social_surveyor.cli_digest.run_digest` so each item ships in
     at most one digest.
     """
-    by_category: dict[str, list[NotifierItem]] = {c: [] for c in DIGEST_CATEGORY_ORDER}
+    by_category: dict[str, list[NotifierItem]] = {}
     for item in items:
-        bucket = by_category.setdefault(item.category, [])
-        bucket.append(item)
+        by_category.setdefault(item.category, []).append(item)
 
-    # off_topic is pinned last across both canonical and fork-defined
-    # categories so it never crowds out the top of the digest, and so
-    # the budget-trim loop below drops it first when space runs out.
-    known_non_off_topic = [
-        c for c in DIGEST_CATEGORY_ORDER if c != OFF_TOPIC_CATEGORY and by_category[c]
-    ]
-    # Fork taxonomies (e.g., opendata-brand) use category ids not in the
-    # canonical tuple; render those in alphabetical order after the
-    # canonical priority list, then pin off_topic at the end.
-    unknown = sorted(c for c in by_category if c not in DIGEST_CATEGORY_ORDER and by_category[c])
-    ordered_categories = [*known_non_off_topic, *unknown]
-    if by_category.get(OFF_TOPIC_CATEGORY):
-        ordered_categories.append(OFF_TOPIC_CATEGORY)
+    # Project-declared order first; any category the classifier produced
+    # but the project didn't declare (e.g. a post-rename drift) renders
+    # after, alphabetically, so nothing silently disappears.
+    declared_with_items = [c for c in config.category_order if by_category.get(c)]
+    declared_set = set(config.category_order)
+    undeclared = sorted(c for c in by_category if c not in declared_set)
+    ordered_categories = [*declared_with_items, *undeclared]
 
     blocks: list[dict[str, Any]] = []
 
@@ -359,27 +352,22 @@ def build_digest(
     for cat in ordered_categories:
         category_groups.append((cat, _build_category_group(cat, by_category[cat], config)))
 
-    dropped_categories: list[str] = []
-    # off_topic is always first to go when the overall budget overflows,
-    # regardless of how much space off_topic itself occupies — an
-    # off-topic section is a false-positive bucket, not signal worth
-    # keeping at the cost of truncating any real category.
+    # Tail-drop: whichever category the project ordered last is the
+    # first to go when total blocks exceed the budget. Keeps the top
+    # of the priority list intact and lets operators control what gets
+    # sacrificed just by reordering categories.yaml.
+    dropped_tail: list[str] = []
     total_needed = sum(len(group) for _, group in category_groups)
-    if total_needed > category_budget:
-        remaining: list[tuple[str, list[dict[str, Any]]]] = []
-        for cat, group in category_groups:
-            if cat == OFF_TOPIC_CATEGORY:
-                dropped_categories.append(cat)
-            else:
-                remaining.append((cat, group))
-        category_groups = remaining
+    while total_needed > category_budget and category_groups:
+        cat, group = category_groups.pop()
+        dropped_tail.append(cat)
+        total_needed -= len(group)
 
-    for cat, group in category_groups:
-        if len(group) <= category_budget:
-            blocks.extend(group)
-            category_budget -= len(group)
-        else:
-            dropped_categories.append(cat)
+    for _cat, group in category_groups:
+        blocks.extend(group)
+
+    # Surface drops in the same order they would have rendered.
+    dropped_categories = list(reversed(dropped_tail))
 
     if dropped_categories:
         dropped_display = ", ".join(config.category_display(c) for c in dropped_categories)
@@ -757,7 +745,6 @@ def post_infra_alert(
 
 __all__ = [
     "CATEGORY_COLORS",
-    "DIGEST_CATEGORY_ORDER",
     "SLACK_MAX_BLOCKS",
     "TOP_N_PER_CATEGORY",
     "DigestStats",

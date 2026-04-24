@@ -70,21 +70,27 @@ def run_digest(
 
     window_start = since or (datetime.now(UTC) - timedelta(hours=routing_cfg.digest.window_hours))
 
-    # Load category labels from categories.yaml so the digest can
-    # show human-friendly category names ("Observability cost
-    # complaint") instead of snake_case ids.
+    # Load categories.yaml so the digest can show human-friendly
+    # labels ("Observability cost complaint") instead of snake_case ids
+    # and so the section order matches what the project declared. The
+    # declaration order is the priority order: highest first, last-
+    # declared is the first one sacrificed when the block budget
+    # overflows.
     try:
         categories = load_categories(project, projects_root=projects_root)
         category_labels = {c.id: c.label for c in categories.categories}
+        category_order = [c.id for c in categories.categories]
     except ConfigError:
         # Categories missing is a different error path (classifier
-        # can't load either); degrade to empty map so the digest
-        # still ships with id-form labels.
+        # can't load either); degrade to empty so the digest still
+        # ships with id-form labels and alphabetical ordering.
         category_labels = {}
+        category_order = []
 
     notifier_cfg = NotifierConfig(
         project=project,
         category_labels=category_labels,
+        category_order=category_order,
     )
 
     with Storage(db_path) as db:
