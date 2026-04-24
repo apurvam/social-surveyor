@@ -144,6 +144,7 @@ done
 require git
 require aws
 require uv
+require python3
 
 # --- working tree ---
 if [ "$ALLOW_DIRTY" -eq 0 ]; then
@@ -230,20 +231,24 @@ if git -C "$REPO_ROOT" show-ref --verify --quiet "refs/heads/$BRANCH"; then
 fi
 
 if [ "$remote_exists" -eq 1 ]; then
-    # Reset local to match origin — safe because remote has everything.
+    # Reset local to match origin; upstream naturally points at
+    # origin/$BRANCH, which is what we want for subsequent pushes.
     git -C "$REPO_ROOT" checkout -B "$BRANCH" "origin/$BRANCH"
 elif [ "$local_exists" -eq 1 ]; then
     # Local branch with no remote: either merged-and-deleted (safe to
-    # rebase onto main) or local-only unpushed work (refuse).
+    # rebase onto main) or local-only unpushed work (refuse). --no-track
+    # is important here: without it, starting from origin/main would
+    # set upstream to origin/main, and a later `git push` with no
+    # refspec would try to push label commits to main itself.
     if git -C "$REPO_ROOT" merge-base --is-ancestor "$BRANCH" origin/main; then
         echo "    $BRANCH is fully merged — starting a fresh labeling window from main"
-        git -C "$REPO_ROOT" checkout -B "$BRANCH" origin/main
+        git -C "$REPO_ROOT" checkout -B "$BRANCH" --no-track origin/main
     else
         die "local branch $BRANCH has unpushed commits and no remote — push, merge, or delete it before labeling"
     fi
 else
     echo "    new labeling window: branching $BRANCH from origin/main"
-    git -C "$REPO_ROOT" checkout -b "$BRANCH" origin/main
+    git -C "$REPO_ROOT" checkout -b "$BRANCH" --no-track origin/main
 fi
 
 # --- ensure staging bucket exists (idempotent) ---
@@ -270,11 +275,26 @@ if ! aws s3api head-bucket --bucket "$BUCKET" --region "$REGION" >/dev/null 2>&1
 fi
 
 # --- presigned PUT URL (so the instance role doesn't need S3 perms) ---
+# `aws s3 presign --http-method PUT` is only available on AWS CLI
+# v2.23+. Generating the URL via boto3 works on any CLI version and
+# picks up the same AWS_PROFILE/AWS_DEFAULT_REGION from the env. uv
+# downloads boto3 into a cached throwaway venv on first use; every
+# subsequent run is a no-op dependency check.
 echo "==> generating presigned PUT URL (expires 300s)"
-PRESIGNED_URL=$(aws s3 presign "s3://$BUCKET/$S3_KEY" \
-    --expires-in 300 \
-    --region "$REGION" \
-    --http-method PUT)
+PRESIGNED_URL=$(BUCKET="$BUCKET" S3_KEY="$S3_KEY" REGION="$REGION" \
+    uv run --quiet --no-project --with boto3 python3 - <<'PY'
+import os
+import boto3
+s3 = boto3.client("s3", region_name=os.environ["REGION"])
+print(s3.generate_presigned_url(
+    ClientMethod="put_object",
+    Params={"Bucket": os.environ["BUCKET"], "Key": os.environ["S3_KEY"]},
+    ExpiresIn=300,
+    HttpMethod="PUT",
+))
+PY
+)
+[ -n "$PRESIGNED_URL" ] || die "presigned URL generation returned empty output"
 
 # --- SSM: instance uploads DB to the presigned URL ---
 REMOTE_BODY=$(cat <<REMOTE
