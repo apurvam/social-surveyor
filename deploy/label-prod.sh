@@ -14,16 +14,26 @@
 #   deploy/label-prod.sh --help
 #
 # What it does:
-#   1. SSM the prod instance to upload its SQLite DB for <project> to
+#   1. Check out a fixed labels/<name> branch (creating it from
+#      origin/main if the remote branch doesn't exist yet, or
+#      fast-forwarding from origin if it does). Every session in a
+#      labeling window lands on the same branch, so there's one
+#      rolling PR instead of one-per-day.
+#   2. SSM the prod instance to upload its SQLite DB for <project> to
 #      a presigned S3 PUT URL (no IAM change on the instance role).
-#   2. aws s3 cp the staged DB down to data/<project>.db.
-#   3. aws s3 rm the staged object.
-#   4. Launch `uv run social-surveyor label --project <name>`
-#      interactively against the fetched DB.
-#   5. If projects/<name>/evals/labeled.jsonl changed, create a
-#      labels/<name>-<stamp> branch, commit the delta, push, and open
-#      a PR via gh. The operator merges + runs deploy/deploy.sh to
-#      persist the labels on prod.
+#   3. aws s3 cp the staged DB down to data/<project>.db.
+#   4. aws s3 rm the staged object.
+#   5. Launch `uv run social-surveyor label --project <name>`
+#      interactively against the fetched DB. Since the labels branch
+#      is already checked out, the labeler sees every prior label in
+#      the current window and skips those items automatically.
+#   6. If projects/<name>/evals/labeled.jsonl changed, append a new
+#      commit on labels/<name>, push, and open a PR via gh (or reuse
+#      the already-open one). Merge + run deploy/deploy.sh at the end
+#      of the labeling window to persist all accumulated labels on
+#      prod. Once the branch is merged and deleted on origin, the next
+#      run detects the fresh state and starts a new labeling window
+#      off main.
 #
 # Flags:
 #   --project <name>       required; project directory name
@@ -176,6 +186,7 @@ LABELS_FILE="projects/${PROJECT}/evals/labeled.jsonl"
 
 STAMP=$(date -u +%Y%m%dT%H%M%SZ)
 S3_KEY="db-snapshots/${PROJECT}/${STAMP}-${RANDOM}.db"
+BRANCH="labels/${PROJECT}"
 
 echo "label session target:"
 echo "  project:   $PROJECT"
@@ -183,20 +194,55 @@ echo "  instance:  $INSTANCE_ID"
 echo "  remote db: $REMOTE_DB"
 echo "  s3 stage:  s3://$BUCKET/$S3_KEY"
 echo "  local db:  $LOCAL_DB"
+echo "  branch:    $BRANCH (fixed — one rolling PR per labeling window)"
 echo "  region:    $REGION"
 echo ""
 
 if [ "$DRY_RUN" -eq 1 ]; then
     echo "--- dry run: would ---"
-    echo "1. ensure S3 staging bucket '$BUCKET' exists (1-day object expiry)"
-    echo "2. generate presigned PUT URL for s3://$BUCKET/$S3_KEY (300s ttl)"
-    echo "3. SSM send-command to $INSTANCE_ID: curl --upload-file $REMOTE_DB to the presigned URL"
-    echo "4. aws s3 cp s3://$BUCKET/$S3_KEY $LOCAL_DB"
-    echo "5. aws s3 rm s3://$BUCKET/$S3_KEY"
-    echo "6. uv run social-surveyor label --project $PROJECT"
-    echo "7. if $LABELS_FILE changed: branch labels/${PROJECT}-${STAMP}, commit, push, gh pr create"
+    echo "1. fetch origin, checkout $BRANCH (create from origin/main if origin/$BRANCH missing)"
+    echo "2. ensure S3 staging bucket '$BUCKET' exists (1-day object expiry)"
+    echo "3. generate presigned PUT URL for s3://$BUCKET/$S3_KEY (300s ttl)"
+    echo "4. SSM send-command to $INSTANCE_ID: curl --upload-file $REMOTE_DB to the presigned URL"
+    echo "5. aws s3 cp s3://$BUCKET/$S3_KEY $LOCAL_DB"
+    echo "6. aws s3 rm s3://$BUCKET/$S3_KEY"
+    echo "7. uv run social-surveyor label --project $PROJECT"
+    echo "8. if $LABELS_FILE changed: commit on $BRANCH, push, open PR (or reuse existing)"
     echo "--- end dry run ---"
     exit 0
+fi
+
+# --- sync + check out the fixed labels branch ---
+# One rolling branch per project: commits accumulate across sessions
+# until the window closes (operator merges + deploys). After merge,
+# origin/$BRANCH is gone → next run starts a fresh window from main.
+echo "==> fetching origin and syncing $BRANCH"
+git -C "$REPO_ROOT" fetch --quiet origin
+
+remote_exists=0
+if git -C "$REPO_ROOT" ls-remote --exit-code --heads origin "$BRANCH" >/dev/null 2>&1; then
+    remote_exists=1
+fi
+local_exists=0
+if git -C "$REPO_ROOT" show-ref --verify --quiet "refs/heads/$BRANCH"; then
+    local_exists=1
+fi
+
+if [ "$remote_exists" -eq 1 ]; then
+    # Reset local to match origin — safe because remote has everything.
+    git -C "$REPO_ROOT" checkout -B "$BRANCH" "origin/$BRANCH"
+elif [ "$local_exists" -eq 1 ]; then
+    # Local branch with no remote: either merged-and-deleted (safe to
+    # rebase onto main) or local-only unpushed work (refuse).
+    if git -C "$REPO_ROOT" merge-base --is-ancestor "$BRANCH" origin/main; then
+        echo "    $BRANCH is fully merged — starting a fresh labeling window from main"
+        git -C "$REPO_ROOT" checkout -B "$BRANCH" origin/main
+    else
+        die "local branch $BRANCH has unpushed commits and no remote — push, merge, or delete it before labeling"
+    fi
+else
+    echo "    new labeling window: branching $BRANCH from origin/main"
+    git -C "$REPO_ROOT" checkout -b "$BRANCH" origin/main
 fi
 
 # --- ensure staging bucket exists (idempotent) ---
@@ -334,26 +380,33 @@ else
 fi
 ADDED=${ADDED:-0}
 
-BRANCH="labels/${PROJECT}-${STAMP}"
+# Committing onto the already-checked-out labels/<project> branch —
+# accumulates one commit per session until the window closes.
 echo ""
-echo "==> branching $BRANCH and committing ${ADDED} label line(s)"
-git -C "$REPO_ROOT" checkout -b "$BRANCH"
+echo "==> committing ${ADDED} label line(s) on $BRANCH"
 git -C "$REPO_ROOT" add "$LABELS_FILE"
-git -C "$REPO_ROOT" commit -m "chore(labels): add ${ADDED} labels from prod session (${PROJECT})" \
+git -C "$REPO_ROOT" commit \
+    -m "chore(labels): add ${ADDED} labels for ${PROJECT} (${STAMP})" \
     -m "Captured via deploy/label-prod.sh against the prod ${PROJECT} DB."
 
-echo "==> git push -u origin $BRANCH"
-git -C "$REPO_ROOT" push -u origin "$BRANCH"
+echo "==> pushing $BRANCH"
+if git -C "$REPO_ROOT" rev-parse --abbrev-ref --symbolic-full-name "@{u}" >/dev/null 2>&1; then
+    git -C "$REPO_ROOT" push
+else
+    git -C "$REPO_ROOT" push -u origin "$BRANCH"
+fi
 
+# PR: reuse if one is already open for this branch, otherwise create.
 if command -v gh >/dev/null 2>&1; then
-    echo "==> opening PR via gh"
-    gh pr create \
-        --title "chore(labels): ${ADDED} new labels for ${PROJECT}" \
-        --body "Captured via \`deploy/label-prod.sh --project ${PROJECT}\` against the prod DB.
-
-- File: \`${LABELS_FILE}\`
-- Added rows: ${ADDED}
-- Merge + \`deploy/deploy.sh --project ${PROJECT}\` to persist the labels on prod."
+    existing_pr=$(gh pr list --head "$BRANCH" --state open --json number -q '.[0].number' 2>/dev/null || true)
+    if [ -n "$existing_pr" ]; then
+        echo "==> appended to existing PR #$existing_pr ($BRANCH)"
+    else
+        echo "==> opening PR via gh"
+        gh pr create \
+            --title "chore(labels): rolling labels PR for ${PROJECT}" \
+            --body "Rolling labels PR for project \`${PROJECT}\`, accumulating across sessions of \`deploy/label-prod.sh\`. Each session appends one commit. When the labeling window is done, merge + run \`deploy/deploy.sh --project ${PROJECT}\` to persist the labels on prod."
+    fi
 else
     echo "    gh CLI not found; open the PR manually for branch $BRANCH"
 fi
