@@ -1,6 +1,13 @@
 #!/bin/bash
 # One-command labeling session against a prod project DB.
 #
+# Intended use:
+#   Pull the live SQLite DB for a running project off the prod host,
+#   run an interactive labeling session locally, then ship the new
+#   ground-truth labels back to the repo as a branch + PR. Designed so
+#   operators never copy prod data around manually, and so every label
+#   lands in git the same way (so `deploy.sh` reliably redeploys them).
+#
 # Usage:
 #   deploy/label-prod.sh --project <name>
 #   deploy/label-prod.sh --project <name> --dry-run
@@ -33,6 +40,38 @@
 #   AWS_DEFAULT_REGION           region (defaults to us-west-2)
 #   SOCIAL_SURVEYOR_INSTANCE_ID  EC2 id; if unset, resolves via
 #                                `pulumi stack output instance_id`
+#
+# Limitations / portability:
+#   This script is AWS-specific by design — it matches the single
+#   deployment shape this repo currently supports (EC2 + SSM Agent +
+#   S3, provisioned by the Pulumi program in deploy/pulumi/). The two
+#   AWS touchpoints are:
+#
+#     (a) REMOTE COMMAND EXECUTION. `aws ssm send-command` runs curl
+#         on the instance to upload the DB. Needs SSM Agent on the host
+#         and an IAM role with the standard SSM managed policy.
+#     (b) FILE STAGING. `aws s3 presign --http-method PUT` + `aws s3 cp`
+#         move the DB between the instance and the laptop through a
+#         short-lived S3 object. The instance role is untouched; the
+#         presigned URL bundles the laptop operator's credentials.
+#
+#   Nothing else in the script is AWS-aware — the labeler, git, and PR
+#   steps are portable. If this repo ever grows a non-AWS deployment
+#   (SSH-to-VM, GCP + gcloud, Fly machine, bare metal), the cleanest
+#   path is to split those two steps into injectable helpers, e.g.:
+#
+#     run_on_host <script>      # SSM Run Command  → ssh, gcloud ssh, etc.
+#     stage_file <remote> <local>   # presigned S3 → scp, gsutil cp, rsync
+#
+#   picked by a SOCIAL_SURVEYOR_REMOTE backend env var ("ssm", "ssh",
+#   ...). Until there's a second deployment target, that abstraction is
+#   premature — keep the shape simple and YAGNI.
+#
+#   Note: the "SSM" in this script is AWS Systems Manager Run Command
+#   (remote exec). It is unrelated to the optional SSM Parameter Store
+#   fallback in secrets.py, which is already pluggable via env vars and
+#   works fine on non-AWS deployments as long as env vars supply the
+#   secrets directly.
 
 set -euo pipefail
 
