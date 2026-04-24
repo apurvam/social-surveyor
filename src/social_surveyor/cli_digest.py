@@ -99,7 +99,8 @@ def run_digest(
                 echo_fn=echo_fn,
             )
 
-        items = _collect_digest_items(db, window_start=window_start)
+        item_cutoff = datetime.now(UTC) - timedelta(hours=routing_cfg.digest.max_item_age_hours)
+        items = _collect_digest_items(db, window_start=window_start, item_cutoff=item_cutoff)
         stats = _compute_digest_stats(
             db,
             project,
@@ -166,6 +167,7 @@ def _collect_digest_items(
     db: Storage,
     *,
     window_start: datetime,
+    item_cutoff: datetime,
 ) -> list[NotifierItem]:
     """Pull digest-channel items pending for this cycle.
 
@@ -178,6 +180,13 @@ def _collect_digest_items(
 
     Silenced items are hidden *unless* their silence is within the
     window, in which case they render with a marker.
+
+    Items whose ``created_at`` is older than ``item_cutoff`` are
+    skipped regardless of how recently they were classified. Matters
+    on a fresh bootstrap: a narrow phrase-match query can pull
+    years-old Algolia hits that get queued today but aren't worth
+    surfacing. The corresponding alert rows still get marked sent by
+    the caller so they don't re-surface tomorrow.
     """
     silenced_in_window = db.silenced_since(window_start)
 
@@ -189,6 +198,8 @@ def _collect_digest_items(
 
     items: list[NotifierItem] = []
     for row in digest_rows:
+        if row["created_at"] < item_cutoff:
+            continue
         item_id = row["item_id"]
         is_silenced_now = db.is_silenced(item_id)
         if is_silenced_now and item_id not in silenced_in_window:
@@ -257,9 +268,7 @@ def _compute_digest_stats(
 
     x_configured = _project_has_x(project, projects_root)
     x_usage = (
-        _resolve_x_usage(project, projects_root, http_client=http_client)
-        if x_configured
-        else None
+        _resolve_x_usage(project, projects_root, http_client=http_client) if x_configured else None
     )
 
     return DigestStats(

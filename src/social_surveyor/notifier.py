@@ -74,6 +74,13 @@ DIGEST_CATEGORY_ORDER: tuple[str, ...] = (
     "off_topic",
 )
 
+# Canonical id for the classifier's "keyword matched but not actually
+# relevant" bucket. Pinned last in every rendered digest (after both
+# canonical and fork-defined categories) and dropped first when the
+# SLACK_MAX_BLOCKS budget forces trimming: off-topic items are
+# definitionally false positives and shouldn't crowd out real signal.
+OFF_TOPIC_CATEGORY = "off_topic"
+
 # Per-category item cap in the main digest message. Overflow gets a
 # single hint line pointing at the CLI inspection command.
 TOP_N_PER_CATEGORY = 5
@@ -297,11 +304,19 @@ def build_digest(
         bucket = by_category.setdefault(item.category, [])
         bucket.append(item)
 
-    categories_with_items = [c for c in DIGEST_CATEGORY_ORDER if by_category[c]]
-    # Any categories outside the known order (defensive — fork with a
-    # custom taxonomy) appear after the known ones, alphabetically.
+    # off_topic is pinned last across both canonical and fork-defined
+    # categories so it never crowds out the top of the digest, and so
+    # the budget-trim loop below drops it first when space runs out.
+    known_non_off_topic = [
+        c for c in DIGEST_CATEGORY_ORDER if c != OFF_TOPIC_CATEGORY and by_category[c]
+    ]
+    # Fork taxonomies (e.g., opendata-brand) use category ids not in the
+    # canonical tuple; render those in alphabetical order after the
+    # canonical priority list, then pin off_topic at the end.
     unknown = sorted(c for c in by_category if c not in DIGEST_CATEGORY_ORDER and by_category[c])
-    ordered_categories = [*categories_with_items, *unknown]
+    ordered_categories = [*known_non_off_topic, *unknown]
+    if by_category.get(OFF_TOPIC_CATEGORY):
+        ordered_categories.append(OFF_TOPIC_CATEGORY)
 
     blocks: list[dict[str, Any]] = []
 
@@ -345,6 +360,20 @@ def build_digest(
         category_groups.append((cat, _build_category_group(cat, by_category[cat], config)))
 
     dropped_categories: list[str] = []
+    # off_topic is always first to go when the overall budget overflows,
+    # regardless of how much space off_topic itself occupies — an
+    # off-topic section is a false-positive bucket, not signal worth
+    # keeping at the cost of truncating any real category.
+    total_needed = sum(len(group) for _, group in category_groups)
+    if total_needed > category_budget:
+        remaining: list[tuple[str, list[dict[str, Any]]]] = []
+        for cat, group in category_groups:
+            if cat == OFF_TOPIC_CATEGORY:
+                dropped_categories.append(cat)
+            else:
+                remaining.append((cat, group))
+        category_groups = remaining
+
     for cat, group in category_groups:
         if len(group) <= category_budget:
             blocks.extend(group)
