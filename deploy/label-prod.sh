@@ -28,12 +28,13 @@
 #      is already checked out, the labeler sees every prior label in
 #      the current window and skips those items automatically.
 #   6. If projects/<name>/evals/labeled.jsonl changed, append a new
-#      commit on labels/<name>, push, and open a PR via gh (or reuse
-#      the already-open one). Merge + run deploy/deploy.sh at the end
-#      of the labeling window to persist all accumulated labels on
-#      prod. Once the branch is merged and deleted on origin, the next
-#      run detects the fresh state and starts a new labeling window
-#      off main.
+#      commit on labels/<name> and push. No PR is opened — the branch
+#      is long-lived and accumulates commits for the whole window.
+#      When you're done labeling, create the PR yourself (`gh pr
+#      create` or the GitHub UI), merge, then run deploy/deploy.sh.
+#      Once the branch is merged and deleted on origin, the next run
+#      detects the fresh state and starts a new labeling window off
+#      main.
 #
 # Flags:
 #   --project <name>       required; project directory name
@@ -194,7 +195,7 @@ echo "  instance:  $INSTANCE_ID"
 echo "  remote db: $REMOTE_DB"
 echo "  s3 stage:  s3://$BUCKET/$S3_KEY"
 echo "  local db:  $LOCAL_DB"
-echo "  branch:    $BRANCH (fixed — one rolling PR per labeling window)"
+echo "  branch:    $BRANCH (fixed — commits accumulate until you open a PR manually)"
 echo "  region:    $REGION"
 echo ""
 
@@ -207,7 +208,7 @@ if [ "$DRY_RUN" -eq 1 ]; then
     echo "5. aws s3 cp s3://$BUCKET/$S3_KEY $LOCAL_DB"
     echo "6. aws s3 rm s3://$BUCKET/$S3_KEY"
     echo "7. uv run social-surveyor label --project $PROJECT"
-    echo "8. if $LABELS_FILE changed: commit on $BRANCH, push, open PR (or reuse existing)"
+    echo "8. if $LABELS_FILE changed: commit on $BRANCH and push (no PR — open one manually when the window closes)"
     echo "--- end dry run ---"
     exit 0
 fi
@@ -396,17 +397,15 @@ else
     git -C "$REPO_ROOT" push -u origin "$BRANCH"
 fi
 
-# PR: reuse if one is already open for this branch, otherwise create.
+# No PR yet — the branch is long-lived and accumulates across the
+# whole labeling window. When the operator decides the window is
+# done, they open the PR, merge, and redeploy. Print the ready-to-go
+# command so it's a single copy-paste at the end of the window.
+echo ""
+echo "==> session committed to $BRANCH. Keep labeling tomorrow with the same command."
 if command -v gh >/dev/null 2>&1; then
-    existing_pr=$(gh pr list --head "$BRANCH" --state open --json number -q '.[0].number' 2>/dev/null || true)
-    if [ -n "$existing_pr" ]; then
-        echo "==> appended to existing PR #$existing_pr ($BRANCH)"
-    else
-        echo "==> opening PR via gh"
-        gh pr create \
-            --title "chore(labels): rolling labels PR for ${PROJECT}" \
-            --body "Rolling labels PR for project \`${PROJECT}\`, accumulating across sessions of \`deploy/label-prod.sh\`. Each session appends one commit. When the labeling window is done, merge + run \`deploy/deploy.sh --project ${PROJECT}\` to persist the labels on prod."
-    fi
-else
-    echo "    gh CLI not found; open the PR manually for branch $BRANCH"
+    echo "    when you're done with this labeling window, open the PR with:"
+    echo "      gh pr create --head $BRANCH \\"
+    echo "        --title 'chore(labels): labeling window for ${PROJECT}' \\"
+    echo "        --body  'Accumulated labels from multiple deploy/label-prod.sh sessions against the prod ${PROJECT} DB.'"
 fi

@@ -117,11 +117,14 @@ def test_dry_run_prints_plan(tmp_path: Path) -> None:
     assert "aws s3 cp" in out
     assert "aws s3 rm" in out
     assert "uv run social-surveyor label --project opendata-brand" in out
-    # Fixed branch, no timestamp — sessions accumulate on one rolling PR.
+    # Fixed branch, no timestamp — sessions accumulate across the window.
     assert "labels/opendata-brand (fixed" in out
     assert "labels/opendata-brand-2" not in out  # catches a stray old-stamp regression
     assert "checkout labels/opendata-brand" in out
     assert "commit on labels/opendata-brand" in out
+    # No PR auto-opened — the dry-run says so in plain language.
+    assert "no PR" in out
+    assert "gh pr create" not in out
 
 
 def test_dry_run_respects_bucket_override(tmp_path: Path) -> None:
