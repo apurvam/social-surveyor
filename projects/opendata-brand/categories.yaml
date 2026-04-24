@@ -57,18 +57,6 @@ categories:
       passing reference in a broader discussion. Default bucket for
       "something happened, low signal otherwise."
 
-  - id: ecosystem_discussion
-    label: "Object-store-native ecosystem discussion"
-    description: >
-      Discussion of the object-store-native database space broadly,
-      without direct mention of OpenData or SlateDB. Examples:
-      architectural blog posts about why object-store-native is the
-      future, comparisons of WarpStream and Turbopuffer, discussion
-      of S3 Express One Zone's implications for databases. Relevant
-      because OpenData's positioning IS the object-store-native
-      thesis; these discussions shape the market. Lower urgency than
-      direct mentions.
-
   - id: slatedb
     label: "SlateDB-specific discussion"
     description: >
@@ -82,7 +70,21 @@ categories:
       comparisons in comparison; explicit praise in positive_mention.
       This bucket is the catch-all for "clearly SlateDB, no other
       intent fits" — distinct from off_topic, which is false-positive
-      keyword matches.
+      keyword matches. Ranked above ecosystem_discussion because a
+      SlateDB-slanted conversation is higher-signal for us than
+      generic object-store-native chatter.
+
+  - id: ecosystem_discussion
+    label: "Object-store-native ecosystem discussion"
+    description: >
+      Discussion of the object-store-native database space broadly,
+      without direct mention of OpenData or SlateDB. Examples:
+      architectural blog posts about why object-store-native is the
+      future, comparisons of WarpStream and Turbopuffer, discussion
+      of S3 Express One Zone's implications for databases. Relevant
+      because OpenData's positioning IS the object-store-native
+      thesis; these discussions shape the market. Lower urgency than
+      direct mentions.
 
   - id: off_topic
     label: "Off topic (false positive)"
