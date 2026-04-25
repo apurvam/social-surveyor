@@ -204,8 +204,9 @@ def test_digest_header_includes_project_name() -> None:
 
 def test_digest_header_uses_display_name_when_set() -> None:
     """When the project sets ``digest.display_name`` in routing.yaml,
-    the Slack header shows that label instead of the on-disk project
-    id — so "opendata-brand" reads as "OpenData chatter" in Slack.
+    the label replaces the full ``Digest for <project>`` phrase — so
+    "opendata-brand" reads as "OpenData chatter" in Slack with no
+    ``Digest for`` prefix dangling in front.
     """
     items = [_item(item_id="hackernews:1", category="cost_complaint", urgency=7)]
     payload = build_digest(
@@ -214,7 +215,10 @@ def test_digest_header_uses_display_name_when_set() -> None:
         _cfg(project="opendata-brand", display_name="OpenData chatter"),
     )
     headers = [b["text"]["text"] for b in payload["blocks"] if b.get("type") == "header"]
-    assert "Digest for OpenData chatter · 2026-04-19" in headers[0]
+    assert "📊 OpenData chatter · 2026-04-19" in headers[0]
+    # display_name replaces the whole "Digest for ..." phrase — the
+    # prefix should not appear anywhere in the header when it's set.
+    assert "Digest for" not in headers[0]
     # The on-disk id should not leak into the header when display_name is set.
     assert "opendata-brand" not in headers[0]
 
@@ -236,14 +240,16 @@ def test_digest_header_falls_back_to_project_when_display_name_unset() -> None:
 def test_digest_empty_day_header_also_uses_display_name() -> None:
     """The "no new items" variant of the header must honor display_name
     too — otherwise on a quiet day the header would revert to the
-    on-disk id."""
+    on-disk id (and re-introduce the ``Digest for`` prefix that
+    display_name is meant to replace)."""
     payload = build_digest(
         [],
         DigestStats(day=date(2026, 4, 24), haiku_cost_usd=0.0, total_labeled=0),
         _cfg(project="opendata-brand", display_name="OpenData chatter"),
     )
     text = _all_text(payload["blocks"])
-    assert "Digest for OpenData chatter · 2026-04-24" in text
+    assert "📊 OpenData chatter · 2026-04-24" in text
+    assert "Digest for" not in text
     assert "opendata-brand" not in text
 
 

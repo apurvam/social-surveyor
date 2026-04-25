@@ -28,9 +28,13 @@ immediate:
 
 digest:
   # Optional human-friendly label for the digest header in Slack. When
-  # set, it replaces the project directory name ("example" here) in
-  # the top "📊 Digest for ..." line. Useful when you want the
-  # on-disk name short but the Slack-facing name to read like a topic.
+  # set, it replaces the entire "📊 Digest for <project>" phrase at
+  # the top of the digest with the literal label you provide — so
+  # `display_name: "Observability chatter"` renders as
+  # "📊 Observability chatter · <date> · ...", with no "Digest for"
+  # prefix. Unset falls back to the default "Digest for <project>"
+  # form. Useful when you want the on-disk name short but the
+  # Slack-facing label to read as a self-contained topic.
   # display_name: "Observability chatter"
   schedule:
     hour: 9
