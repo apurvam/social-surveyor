@@ -109,7 +109,8 @@ def test_missing_ref_errors(tmp_path: Path) -> None:
 
 def test_dry_run_with_tag(tmp_path: Path) -> None:
     """Dry-run with a valid local tag prints the remote script using
-    the tag's resolved SHA."""
+    the tag's resolved SHA. With no --project, scope defaults to
+    every active social-surveyor@* unit on the host."""
     _init_repo_with_commit(tmp_path)
     env = _env_with_base({"SOCIAL_SURVEYOR_INSTANCE_ID": "i-ffffffffffffffff"})
     subprocess.run(["git", "-C", str(tmp_path), "tag", "v0.0.1"], check=True, env=env)
@@ -128,7 +129,10 @@ def test_dry_run_with_tag(tmp_path: Path) -> None:
     assert "would execute on i-ffffffffffffffff" in result.stdout
     assert f"git checkout --detach {sha}" in result.stdout
     assert "ref:      v0.0.1 (tag)" in result.stdout
-    assert "social-surveyor@opendata" in result.stdout
+    # Default scope: discover all active social-surveyor@* units remotely
+    # rather than baking in a single project name.
+    assert "scope:    all active social-surveyor@* instances" in result.stdout
+    assert 'systemctl list-units "social-surveyor@*.service"' in result.stdout
 
 
 def test_dry_run_with_branch(tmp_path: Path) -> None:
@@ -218,6 +222,8 @@ def test_dry_run_default_resolves_main(tmp_path: Path) -> None:
 
 
 def test_dry_run_respects_project_override(tmp_path: Path) -> None:
+    """--project pins the restart to a single instance instead of the
+    discover-all default."""
     _init_repo_with_commit(tmp_path)
     env = _env_with_base({"SOCIAL_SURVEYOR_INSTANCE_ID": "i-aaa"})
     subprocess.run(["git", "-C", str(tmp_path), "tag", "v0.0.1"], check=True, env=env)
@@ -230,7 +236,35 @@ def test_dry_run_respects_project_override(tmp_path: Path) -> None:
         env=env,
     )
     assert result.returncode == 0
-    assert "social-surveyor@other" in result.stdout
+    assert "scope:    single instance: social-surveyor@other" in result.stdout
+    assert "UNITS='social-surveyor@other.service'" in result.stdout
+    # Single-target should NOT engage the discover-all path.
+    assert "list-units" not in result.stdout
+
+
+def test_dry_run_env_var_pins_single_target(tmp_path: Path) -> None:
+    """SOCIAL_SURVEYOR_PROJECT remains supported as an env-var alias for
+    --project. With it set, the restart scope is the single named
+    instance, not all active units."""
+    _init_repo_with_commit(tmp_path)
+    env = _env_with_base(
+        {
+            "SOCIAL_SURVEYOR_INSTANCE_ID": "i-aaa",
+            "SOCIAL_SURVEYOR_PROJECT": "opendata-brand",
+        }
+    )
+    subprocess.run(["git", "-C", str(tmp_path), "tag", "v0.0.1"], check=True, env=env)
+
+    result = subprocess.run(
+        ["bash", str(SCRIPT), "v0.0.1", "--dry-run"],
+        capture_output=True,
+        text=True,
+        cwd=str(tmp_path),
+        env=env,
+    )
+    assert result.returncode == 0
+    assert "scope:    single instance: social-surveyor@opendata-brand" in result.stdout
+    assert "list-units" not in result.stdout
 
 
 if __name__ == "__main__":  # pragma: no cover

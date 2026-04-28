@@ -251,9 +251,10 @@ them is merged:
 AWS_PROFILE=prod deploy/deploy.sh              # deploys origin/main HEAD
 ```
 
-`deploy.sh` restarts the `--project opendata` systemd instance by
-default; the new project's instance doesn't exist yet, so this is a
-no-op for it. That's fine.
+`deploy.sh` restarts every active `social-surveyor@*` instance by
+default. The new project's unit isn't enabled yet, so this run only
+moves the existing instances to the new SHA — the new project's
+disk-side YAMLs still land at `/opt/social-surveyor/projects/<n>/`.
 
 ### 8.3 — Provision per-project state and start the service (on the instance, via SSM)
 
@@ -400,18 +401,29 @@ What the script does:
    `pulumi stack output instance_id`.
 4. Sends a single `aws ssm send-command` invocation that, on the
    instance, fetches, checks out the resolved SHA detached, runs
-   `uv sync`, restarts `social-surveyor@<project>`, and tails the
-   last 20 lines of journald.
+   `uv sync`, discovers the set of active `social-surveyor@*`
+   instances, restarts each, and tails the last 20 lines of journald
+   over the combined set. `--project <name>` narrows the restart to
+   a single instance.
 5. Polls the invocation to completion and streams stdout + stderr
    back. Exits non-zero on any remote failure.
+
+Restart scope: the on-disk checkout at `/opt/social-surveyor` is
+shared across every project's systemd instance, so a deploy that only
+restarts one leaves the others' Python processes running stale code
+in memory until they're separately bounced. The default behaviour
+bounces everything active so all running projects move to the new SHA
+together; pass `--project <name>` (or set `SOCIAL_SURVEYOR_PROJECT`)
+to opt back into single-target restarts when you're deliberately
+rolling forward only one project.
 
 Useful flags:
 
 ```bash
 deploy/deploy.sh --help
-deploy/deploy.sh --dry-run                    # print the remote command, don't SSM
-deploy/deploy.sh v0.6.0 --project agent-infra # deploy a different systemd instance
-deploy/deploy.sh main --dirty                 # skip the clean-tree check
+deploy/deploy.sh --dry-run                       # print the remote command, don't SSM
+deploy/deploy.sh v0.6.0 --project opendata-brand # restart only one instance
+deploy/deploy.sh main --dirty                    # skip the clean-tree check
 ```
 
 ### Fallback — manual SSM

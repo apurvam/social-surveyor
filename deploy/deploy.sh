@@ -19,12 +19,13 @@
 #   AWS_DEFAULT_REGION          region (defaults to us-west-2)
 #   SOCIAL_SURVEYOR_INSTANCE_ID  EC2 instance id; if unset, resolves via
 #                               `pulumi stack output instance_id`
-#   SOCIAL_SURVEYOR_PROJECT     systemd template instance (defaults to opendata)
+#   SOCIAL_SURVEYOR_PROJECT     restart only this systemd instance (same as --project)
 #
 # Flags:
 #   --dry-run                    print the remote command, don't execute it
 #   --dirty                      allow deploy with a dirty working tree
-#   --project <name>             override systemd project name
+#   --project <name>             restart only this systemd instance
+#                                (default: restart every active social-surveyor@*)
 #   --help                       this message
 #
 # What it does on the instance (commands run against the resolved SHA,
@@ -33,8 +34,18 @@
 #   2. git fetch --all --tags
 #   3. git checkout --detach <sha>
 #   4. uv sync
-#   5. systemctl restart social-surveyor@<project>
-#   6. journalctl -u social-surveyor@<project> --since '10 seconds ago'
+#   5. discover the set of active social-surveyor@* services
+#      (or the single --project instance) and `systemctl restart` each
+#   6. journalctl --since '10 seconds ago' over the restarted set
+#
+# Restart scope: by default every active social-surveyor@* unit is
+# bounced. The on-disk checkout at /opt/social-surveyor is shared
+# across all project instances, so a deploy that only restarts one
+# leaves the others' Python processes running stale code in memory
+# until the next time they're touched. Bouncing all on every deploy
+# keeps every running project on the same SHA. `--project <name>` /
+# `SOCIAL_SURVEYOR_PROJECT` opts back into single-target restarts when
+# rolling forward only one project deliberately.
 #
 # Streams the remote command's stdout+stderr once SSM reports done.
 # Exits non-zero on any remote failure or SSM error.
@@ -42,7 +53,11 @@
 set -euo pipefail
 
 REGION="${AWS_DEFAULT_REGION:-us-west-2}"
-PROJECT="${SOCIAL_SURVEYOR_PROJECT:-opendata}"
+# Empty PROJECT means "restart every active social-surveyor@* on the
+# host"; a value pins the restart to a single instance. SOCIAL_SURVEYOR_PROJECT
+# remains supported as an env-var alias for --project (no default — set
+# it explicitly when you want single-target behaviour).
+PROJECT="${SOCIAL_SURVEYOR_PROJECT:-}"
 DRY_RUN=0
 ALLOW_DIRTY=0
 REF=""
@@ -159,6 +174,21 @@ fi
 # SSM's AWS-RunShellScript executes each line via /bin/sh (dash on
 # Ubuntu), which doesn't support `set -o pipefail`. We wrap the whole
 # body in `bash -c` so pipefail and other bash-isms work predictably.
+#
+# The set of units to restart is computed remotely so the laptop
+# doesn't need to know which projects are currently active. With
+# --project, the set is a single literal unit name. Without, the set
+# is whatever `systemctl list-units` reports as active for the
+# social-surveyor@* template — keeps the deploy honest about what's
+# running on the host right now.
+if [ -n "$PROJECT" ]; then
+    UNITS_INIT_LINE="UNITS='social-surveyor@${PROJECT}.service'"
+    SCOPE_LABEL="single instance: social-surveyor@${PROJECT}"
+else
+    UNITS_INIT_LINE='UNITS=$(systemctl list-units "social-surveyor@*.service" --state=active --no-legend --no-pager | awk "{print \$1}")'
+    SCOPE_LABEL="all active social-surveyor@* instances"
+fi
+
 REMOTE_BODY=$(cat <<REMOTE
 set -euo pipefail
 cd /opt/social-surveyor
@@ -168,13 +198,27 @@ echo '==> git checkout --detach ${RESOLVED_SHA}'
 sudo -u social-surveyor git checkout --detach ${RESOLVED_SHA}
 echo '==> uv sync'
 sudo -u social-surveyor /usr/local/bin/uv sync --directory /opt/social-surveyor
-echo '==> systemctl restart social-surveyor@${PROJECT}'
-sudo systemctl restart social-surveyor@${PROJECT}
+echo '==> resolving services to restart (${SCOPE_LABEL})'
+${UNITS_INIT_LINE}
+if [ -z "\${UNITS}" ]; then
+    echo "    no matching services to restart" >&2
+    exit 1
+fi
+echo "    will restart:"
+for u in \${UNITS}; do echo "      - \${u}"; done
+for u in \${UNITS}; do
+    echo "==> systemctl restart \${u}"
+    sudo systemctl restart "\${u}"
+done
 sleep 5
-echo '==> systemctl is-active social-surveyor@${PROJECT}'
-sudo systemctl is-active social-surveyor@${PROJECT}
-echo '==> last 20 journal lines'
-sudo journalctl -u social-surveyor@${PROJECT} --since '10 seconds ago' --no-pager | tail -20
+for u in \${UNITS}; do
+    echo "==> systemctl is-active \${u}"
+    sudo systemctl is-active "\${u}"
+done
+echo '==> last 20 journal lines (combined)'
+JOURNAL_ARGS=()
+for u in \${UNITS}; do JOURNAL_ARGS+=( -u "\${u}" ); done
+sudo journalctl "\${JOURNAL_ARGS[@]}" --since '10 seconds ago' --no-pager | tail -20
 REMOTE
 )
 
@@ -186,7 +230,7 @@ REMOTE_SCRIPT="echo ${REMOTE_BODY_B64} | base64 -d | bash"
 echo "deploy target:"
 echo "  ref:      $REF ($REF_TYPE)"
 echo "  sha:      $RESOLVED_SHA"
-echo "  project:  $PROJECT"
+echo "  scope:    $SCOPE_LABEL"
 echo "  instance: $INSTANCE_ID"
 echo "  region:   $REGION"
 echo ""
